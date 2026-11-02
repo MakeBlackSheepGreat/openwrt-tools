@@ -75,6 +75,34 @@ class OnlineTests(unittest.TestCase):
             with self.subTest(offset=offset),self.assertRaises(ValueError):superblocks(raw)
         with self.assertRaises(ValueError):superblocks(sb()[:-1])
 
+    def test_factory_partial_section_is_valid_on_both_storage_kinds(self):
+        # Actual MU5358 stock geometry, anonymized identity. The 1 MiB tail
+        # is part of block_count, not evidence of a corrupt filesystem.
+        old=13411584
+        info=superblocks(sb(old))
+        self.assertEqual(info['blocks']%info['section_blocks'],256)
+        for node in ('mmcblk0p83','sdb83'):
+            for size in (2<<30,4<<30,(4<<30)+(1<<20),8<<30):
+                d,_,_=device();d['storage'].update(NODE=node,SIZE=old*8,START=14862336)
+                d.update(userdata_bytes=old*4096,free_bytes=40<<30)
+                d['online_shrink']=dict(available=True,**info)
+                target=allocation(d,size)
+                final=target['target_blocks'];section=info['section_blocks']
+                argument=final-old%section
+                kernel_result=old-((old-argument)//section)*section
+                self.assertEqual(kernel_result,final)
+                self.assertEqual((old-final)%section,0)
+                self.assertLessEqual(final*4096,target['new_sectors']*512)
+                self.assertLess(target['new_sectors']*512-final*4096,section*4096)
+                for family in ('e5','mu300'):
+                    plan=plan_install({'adapter':family},d,dict(method='part',size_gib=size/(1<<30)))
+                    self.assertFalse(plan['wipe'])
+                    self.assertEqual(plan['shrink_strategy'],'online-f2fs')
+
+    def test_invalid_partial_geometry_still_rejected(self):
+        for count in (0,256,(2**64-1)//4096+1):
+            with self.subTest(blocks=count),self.assertRaises(ValueError):superblocks(sb(count))
+
     def test_prefer_online_but_keep_explicit_format_and_existing_free_space(self):
         for kind in ('e5','mu300'):
             for slot in ('_a','_b'):
