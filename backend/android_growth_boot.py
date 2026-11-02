@@ -38,9 +38,12 @@ def identity_helper(record, adapter):
     return None
 
 
-def verify_image(original, updated):
+def verify_image(original, updated, *, container='boot'):
     """Permit a ramdisk edit, not a different kernel/command line/OS version."""
-    if len(original) != 64 << 20 or len(updated) != len(original):
+    if container not in ('boot','init_boot'):
+        raise ValueError('Unknown Android maintenance container')
+    expected = (8 if container == 'init_boot' else 64) << 20
+    if len(original) != expected or len(updated) != len(original):
         raise ValueError('Android maintenance boot size differs')
     for data in (original, updated):
         if data[:8] != b'ANDROID!' or struct.unpack_from('<I', data, 40)[0] not in (3, 4):
@@ -54,7 +57,10 @@ def verify_image(original, updated):
     size = struct.unpack_from('<I', original, 8)[0]
     end = 4096 + ((size + 4095) & ~4095)
     ramdisk = struct.unpack_from('<I', updated, 12)[0]
-    if a != b or not size or not ramdisk or original[4096:end] != updated[4096:end] or end+ramdisk > len(updated)-4096:
+    valid_kernel = size == 0 if container == 'init_boot' else size > 0
+    if container == 'init_boot' and struct.unpack_from('<I',original,40)[0] != 4:
+        valid_kernel = False
+    if a != b or not valid_kernel or not ramdisk or original[4096:end] != updated[4096:end] or end+ramdisk > len(updated)-4096:
         raise ValueError('Android maintenance boot changed outside its ramdisk')
     if original == updated:
         raise ValueError('Android maintenance hook was not added')
@@ -160,21 +166,23 @@ done
 # Restore the original Android image even when growth failed; keep the
 # maintenance receipts. Only our exact installed image may be replaced.
 [ "$(sha256sum "$dir/android.img" | cut -d' ' -f1)" = @ANDROID_SHA@ ]
-current=$(sha256sum /dev/block/by-name/boot_@SLOT@ | cut -d' ' -f1)
+current=$(sha256sum /dev/block/by-name/@BOOT_PART@ | cut -d' ' -f1)
 wanted=$(sha256sum "$dir/maintenance.img" | cut -d' ' -f1)
 [ "$current" = "$wanted" ] || [ "$current" = @ANDROID_SHA@ ]
 if [ "$current" != @ANDROID_SHA@ ]; then
-    dd if="$dir/android.img" of=/dev/block/by-name/boot_@SLOT@ bs=1048576 conv=fsync
+    dd if="$dir/android.img" of=/dev/block/by-name/@BOOT_PART@ bs=1048576 conv=fsync
 fi
-[ "$(sha256sum /dev/block/by-name/boot_@SLOT@ | cut -d' ' -f1)" = @ANDROID_SHA@ ]
+[ "$(sha256sum /dev/block/by-name/@BOOT_PART@ | cut -d' ' -f1)" = @ANDROID_SHA@ ]
 sync
 setprop sys.powerctl reboot
 '''
 
 
-def scripts(record, adapter, volume, android_sha, *, operation='uninstall'):
+def scripts(record, adapter, volume, android_sha, *, operation='uninstall', container='boot'):
     if operation not in ('uninstall','expand'): raise ValueError('Unknown Android growth operation')
     slot = record['device']['slot'].removeprefix('_')
+    if slot not in ('a','b') or container not in ('boot','init_boot'):
+        raise ValueError('Invalid Android maintenance target')
     other = 'b' if slot == 'a' else 'a'
     identity = record['id']
     if not re.fullmatch('[a-zA-Z0-9-]{1,80}', identity):
@@ -202,7 +210,7 @@ def scripts(record, adapter, volume, android_sha, *, operation='uninstall'):
     library = storage.library(adapter.root)
     identity_function = 'mu300_storage_identity' if adapter.kind == 'mu300' else 'e5_storage_identity'
     values = {'BASE':'/dev/openwrt-grow-'+identity, 'NODE':node, 'DISK':disk,
-              'ID':identity, 'OPERATION':operation, 'MAPPING':proof.get('mapping_kind','dm'), 'SLOT':slot, 'OTHER':other, 'TARGET':str(target),
+              'ID':identity, 'OPERATION':operation, 'MAPPING':proof.get('mapping_kind','dm'), 'SLOT':slot, 'BOOT_PART':container+'_'+slot, 'OTHER':other, 'TARGET':str(target),
               'SECTORS':str(target//512), 'BEFORE':str(before), 'MINIMUM':str(target-(4 << 20)),
               'UUID':uuid, 'CID':record['device']['cid'], 'ANDROID_SHA':android_sha,
               'FSCK_SHA':fsck_sha, 'RESIZE_SHA':proof['resizer_sha256'],
@@ -227,7 +235,7 @@ def scripts(record, adapter, volume, android_sha, *, operation='uninstall'):
     return files
 
 
-def prepare_image(adb, ctx, remote, local, source, files, tool_sha):
+def prepare_image(adb, ctx, remote, local, source, files, tool_sha, *, container='boot'):
     """Only ordinary staging files are written; this never arms or boots it."""
     adb.shell('umask 077; mkdir -p '+remote+'; chmod 700 '+remote+'; chown 2000:2000 '+remote, root=True)
     for name, content in files.items():
@@ -246,9 +254,9 @@ def prepare_image(adb, ctx, remote, local, source, files, tool_sha):
     build += MAGISKBOOT+' repack android.img maintenance.img; chmod 644 maintenance.img'
     adb.shell(build, root=True, timeout=None)
     output = local/'maintenance.img'
-    pull_binary(adb.call,adb.shell,'cat '+remote+'/maintenance.img',output,expected_size=64 << 20)
+    pull_binary(adb.call,adb.shell,'cat '+remote+'/maintenance.img',output,expected_size=source.stat().st_size)
     updated = output.read_bytes()
-    verify_image(source.read_bytes(), updated)
+    verify_image(source.read_bytes(), updated,container=container)
     return updated
 
 
@@ -263,19 +271,28 @@ def stage(worker, device, volume, *, operation='uninstall'):
     remote = '/data/local/tmp/openwrt-'+operation+'-'+record['id']+'-android-growth'
     local = ctx.directory/operation/'android-growth'
     local.mkdir(parents=True, exist_ok=True)
-    boot_path = '/dev/block/by-name/boot_'+slot
+    container = 'init_boot' if getattr(worker.adapter,'package',{}).get('profile') == 'u30pro' else 'boot'
+    boot_path = '/dev/block/by-name/'+container+'_'+slot
+    boot_bytes = (8 if container == 'init_boot' else 64) << 20
+    if container == 'init_boot':
+        header=adb.read('dd if=/dev/block/by-name/boot_'+slot+' bs=4096 count=1 2>/dev/null')
+        if len(header) != 4096 or header[:8] != b'ANDROID!' or struct.unpack_from('<I',header,40)[0] != 4 or struct.unpack_from('<I',header,12)[0]:
+            raise RecoveryRequired('Android boot does not use the expected split ramdisk / Android 启动布局不是预期的独立 ramdisk')
+        if adb.shell('blockdev --getsize64 '+boot_path,root=True).strip() != str(boot_bytes):
+            raise RecoveryRequired('Android init_boot capacity differs / Android init_boot 容量不符')
     source = local/'android.img'
-    pull_binary(adb.call,adb.shell,'dd if='+boot_path+' bs=1048576 count=64 2>/dev/null',source,expected_size=64 << 20)
+    pull_binary(adb.call,adb.shell,'dd if='+boot_path+' bs=1048576 count='+str(boot_bytes >> 20)+' 2>/dev/null',source,expected_size=boot_bytes)
     boot = source.read_bytes()
     android_sha = hashlib.sha256(boot).hexdigest()
     # Keep the current working Android image, independently of any earlier
     # pre-reset backup. Only its ramdisk changes temporarily; the stock kernel
     # and the actual Android slot (including logical system/vendor) are kept.
-    files = scripts(record, worker.adapter, volume, android_sha, operation=operation)
-    updated = prepare_image(adb,ctx,remote,local,source,files,tool_sha)
+    files = scripts(record, worker.adapter, volume, android_sha, operation=operation,container=container)
+    updated = prepare_image(adb,ctx,remote,local,source,files,tool_sha,container=container)
     patched = local/'maintenance.img'; patched.write_bytes(updated)
     patched_sha = sha(patched)
     record.update({operation+'_android_growth_sha256':patched_sha,
+                   operation+'_android_growth_container':container,
                    operation+'_android_growth_source_sha256':android_sha,
                    operation+'_android_growth_attempted':True,
                    operation+'_growth_pending':True,
@@ -322,13 +339,16 @@ def restore(worker, device, *, operation='uninstall'):
     expected = record.get(operation+'_android_growth_source_sha256')
     patched = record.get(operation+'_android_growth_sha256')
     source = ctx.directory/operation/'android-growth/android.img'
+    container = record.get(operation+'_android_growth_container','boot')
+    if container not in ('boot','init_boot'):
+        raise RecoveryRequired('Unknown Android growth recovery container')
     if (not re.fullmatch('[a-f0-9]{64}',expected or '') or
             not re.fullmatch('[a-f0-9]{64}',patched or '') or
-            not source.is_file() or source.stat().st_size != 64 << 20 or sha(source) != expected):
+            not source.is_file() or source.stat().st_size != (8 if container == 'init_boot' else 64) << 20 or sha(source) != expected):
         raise RecoveryRequired('Android growth boot backup is damaged / Android 扩容启动备份损坏，请保留备份')
     if device['slot'] != record['device']['slot'] or worker.layout_state() != 'after':
         raise RecoveryRequired('Android growth recovery identity/layout changed')
-    slot = device['slot'].removeprefix('_'); target='/dev/block/by-name/boot_'+slot
+    slot = device['slot'].removeprefix('_'); target='/dev/block/by-name/'+container+'_'+slot
     current = adb.shell('sha256sum '+target,root=True).split()[0]
     if current == expected:
         # ADB may have disconnected after the device-side commit. Exact boot

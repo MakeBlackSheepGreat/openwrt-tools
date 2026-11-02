@@ -85,7 +85,7 @@ static int decode(const unsigned char *raw, struct geometry *g)
     g->blocks = le64(a + 36);
     g->section_blocks = 512ULL * le32(a + 24);
     memcpy(g->uuid, a + 108, 16);
-    if (!g->blocks || g->blocks % g->section_blocks) {
+    if (g->blocks < g->section_blocks || g->blocks > UINT64_MAX / 4096) {
         errno = EINVAL;
         return -1;
     }
@@ -119,12 +119,20 @@ static int validate_target(const struct geometry *g, uint64_t expected,
                            uint64_t target, uint64_t used)
 {
     if (expected != g->blocks || !target || target >= expected ||
-        target % g->section_blocks || target > UINT64_MAX / 4096 ||
+        (expected - target) % g->section_blocks || target > UINT64_MAX / 4096 ||
         used > UINT64_MAX - (1ULL << 30) || target * 4096 <= used + (1ULL << 30)) {
         errno = EINVAL;
         return -1;
     }
     return 0;
+}
+
+/* Stock F2FS takes an absolute section-aligned ioctl argument, but updates
+ * block_count by subtracting whole sections. Retain the original partial tail
+ * in our expected read-back value; never shrink GPT to the smaller argument. */
+static uint64_t resize_argument(uint64_t expected, uint64_t target, uint64_t section)
+{
+    return target - expected % section;
 }
 
 static int failure(const char *stage)
@@ -213,7 +221,8 @@ static int worker_command(int argc, char **argv)
         fstatvfs(mount_fd, &volume) || (volume.f_flag & ST_RDONLY) ||
         ioctl(disk_fd, BLKGETSIZE64, &actual_bytes) || actual_bytes != disk_bytes ||
         ioctl(raw_fd, BLKGETSIZE64, &mapped_bytes) || read_geometry(raw_fd, &g) ||
-        g.blocks > mapped_bytes / 4096 || target >= expected || target % g.section_blocks)
+        g.blocks > mapped_bytes / 4096 || target >= expected ||
+        (expected - target) % g.section_blocks)
         return failure("worker-identity");
     for (int i=0; i<16; i++) snprintf(uuid+i*2, 3, "%02x", g.uuid[i]);
     if (strcmp(uuid, argv[9]) || (g.blocks != expected && g.blocks != target) ||
@@ -241,7 +250,8 @@ static int worker_command(int argc, char **argv)
     if (g.blocks == expected) {
         receipt("shrinking", 0);
         if (syncfs(mount_fd)) { receipt("failed", errno); _exit(1); }
-        int rc = ioctl(mount_fd, F2FS_RESIZE, &target), error = errno;
+        uint64_t argument = resize_argument(expected, target, g.section_blocks);
+        int rc = ioctl(mount_fd, F2FS_RESIZE, &argument), error = errno;
         /* Some errors can occur after mutation. Read back before deciding. */
         if (read_geometry(raw_fd, &g)) { receipt("recovery", errno); _exit(1); }
         if (g.blocks == expected && rc) { receipt("unchanged", error); _exit(1); }
@@ -299,6 +309,13 @@ int main(int argc, char **argv)
     fflush(stdout);
     if (!strcmp(argv[1], "inspect")) return 0;
     if (!strcmp(argv[1], "probe")) {
+        if (before.blocks % before.section_blocks) {
+            /* Rounding down here would be a real shrink, not a safe probe.
+             * Leave capability checking to the explicitly confirmed worker;
+             * it verifies unchanged FS/GPT before offering any fallback. */
+            puts("same_size_probe=DEFERRED_UNALIGNED_TAIL");
+            return 0;
+        }
         /* Exact current size is a supported no-op, not a shrink dry run. */
         uint64_t same = before.blocks;
         if (ioctl(mount_fd, F2FS_RESIZE, &same)) return failure("same-size-probe");
@@ -321,7 +338,8 @@ int main(int argc, char **argv)
     }
     printf("ioctl_begin expected=%" PRIu64 " target=%" PRIu64 "\n", expected, target);
     fflush(stdout);
-    if (ioctl(mount_fd, F2FS_RESIZE, &target)) return failure("resize-ioctl");
+    uint64_t argument = resize_argument(expected, target, before.section_blocks);
+    if (ioctl(mount_fd, F2FS_RESIZE, &argument)) return failure("resize-ioctl");
     if (syncfs(mount_fd)) return failure("post-sync");
     if (read_geometry(raw_fd, &after) || after.blocks != target ||
         memcmp(before.uuid, after.uuid, sizeof(before.uuid))) {

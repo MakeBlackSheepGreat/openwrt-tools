@@ -61,7 +61,10 @@ def superblocks(raw):
     sections = struct.unpack_from('<I', a, 24)[0]
     blocks = struct.unpack_from('<Q', a, 36)[0]
     uuid = a[108:124].hex()
-    if not 0 < sections <= 65536 or not blocks or blocks % (sections*512) or uuid == '0'*32:
+    # mkfs may leave a partial section at the end of the device. block_count
+    # includes it; section alignment applies to the resize delta, not to the
+    # validity of the original filesystem (MU5358 stock has a 256-block tail).
+    if not 0 < sections <= 65536 or blocks < sections*512 or blocks > (2**64-1)//4096 or uuid == '0'*32:
         raise ValueError('Invalid F2FS geometry / F2FS 几何无效')
     return dict(blocks=blocks, section_blocks=sections*512, uuid=uuid)
 
@@ -97,7 +100,11 @@ def allocation(device, requested):
     # Same MiB alignment as the existing offline/uninstall geometry contract.
     sectors = ((s['SIZE']-requested//512)//2048)*2048
     section = info['section_blocks']
-    blocks = (sectors*512//4096//section)*section
+    budget = sectors*512//4096
+    old = info['blocks']
+    # The kernel removes whole sections and preserves the old partial tail.
+    # Round the shrink UP so read-back capacity fits entirely inside new GPT.
+    blocks = old - ((old-budget+section-1)//section)*section
     if (sectors*512 < 2 << 30 or blocks >= info['blocks'] or
             blocks*4096 <= device['userdata_bytes']-device['free_bytes']+(2 << 30)):
         raise ValueError('Insufficient free space for preserving Android / 保留 Android 数据的缩容空间不足')

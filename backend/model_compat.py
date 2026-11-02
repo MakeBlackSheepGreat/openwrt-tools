@@ -28,12 +28,14 @@ def runtime_warning(expected, actual):
 MU300_MODELS = ('MU300','F50','V50','U30 Air')
 
 
-def mu300_android(model, board, platform=''):
+def mu300_android(model, board, platform='', expected='mu300-family'):
     names = [name.strip().upper() for name in (model, board)]
     profile = 'mu300-family'
     expected_board = None
     matched = False
-    if 'MU3351' in names or 'V50' in names:
+    if 'MU5358' in names or any(re.fullmatch(r'U30[ _-]?PRO', n) for n in names):
+        profile, matched = 'u30pro', platform.strip() == 'ums9632'
+    elif 'MU3351' in names or 'V50' in names:
         profile = 'v50'
         expected_board = 'MU3351 / ums9620'
         matched = 'MU3351' in names and 'V50' in names and platform.strip() == 'ums9620'
@@ -41,17 +43,18 @@ def mu300_android(model, board, platform=''):
         profile, matched = 'u30air', True
     elif re.search(r'MU300|F50', model+'\n'+board, re.I):
         profile, matched = 'f50', True
+    matched = matched and ((profile == 'u30pro') == (expected == 'u30pro'))
     warning = None if matched else {
-        'expected_profile':'mu300-family','expected_models':list(MU300_MODELS),
+        'expected_profile':expected,'expected_models':['MU5358 / U30 Pro'] if expected == 'u30pro' else list(MU300_MODELS),
         'expected_board':expected_board,'actual_model':model,'actual_board':board,
         'actual_platform':platform}
     return profile, warning
 
 
-def mu300_runtime(actual):
-    if actual in ('f50','v50','u30air'):
+def mu300_runtime(actual, expected='mu300-family'):
+    if actual == 'u30pro' and expected == 'u30pro' or expected != 'u30pro' and actual in ('f50','v50','u30air'):
         return None
-    return {'expected_profile':'mu300-family','expected_models':list(MU300_MODELS),
+    return {'expected_profile':expected,'expected_models':['U30 Pro'] if expected == 'u30pro' else list(MU300_MODELS),
             'expected_board':None,'actual_model':actual.upper(),'actual_board':None}
 
 

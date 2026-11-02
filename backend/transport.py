@@ -224,7 +224,7 @@ class Adb:
             process.communicate(timeout=5)
 
     def backup_partition(self, name, destination, context):
-        if not re.fullmatch(r'(misc|metadata|(?:boot|uboot|sml|teecfg|trustos|vbmeta|dtbo|vendor_boot)_[ab])',name):
+        if not re.fullmatch(r'(misc|metadata|(?:boot|init_boot|uboot|sml|teecfg|trustos|vbmeta|dtbo|vendor_boot)_[ab])',name):
             raise ValueError('Unsupported backup partition')
         source='/dev/block/by-name/'+name
         total=4096 if name=='misc' else int(self.shell('blockdev --getsize64 '+source,root=True).strip())

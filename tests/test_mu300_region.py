@@ -100,6 +100,7 @@ class Region(unittest.TestCase):
 
     def test_actual_probe_never_enters_upstream_discovery_for_install_update_or_expand(self):
         adapter=Adapter.__new__(Adapter)
+        adapter.package={'profile':'mu300-family'}
         adapter.kind='mu300';adapter.root=Path(self.fx.temp.name);adapter.ctx=None;adapter.bind=Mock()
         adapter.adb=SimpleNamespace(devices=Mock(return_value=[{'serial':'selected','state':'device'}]),
             properties=Mock(return_value={'ro.product.model':'F50','ro.product.device':'MU300',

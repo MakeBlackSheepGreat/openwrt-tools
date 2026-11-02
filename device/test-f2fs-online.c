@@ -83,6 +83,21 @@ int main(void)
     raw[1024 + SB_VERSION] ^= 1; raw[5120 + SB_VERSION] ^= 1;
     assert(decode(raw, &g)); /* stale CRCs on both copies */
     memcpy(raw, saved, sizeof(raw)); put64(raw + 1024 + 36, 29008895);
+    memcpy(raw + 5120, raw + 1024, SB_BYTES); assert(!decode(raw, &g));
+    /* Factory partial sections are valid. Emulate stock kernel arithmetic:
+     * absolute argument aligned, actual removal rounded to whole sections. */
+    put64(raw + 1024 + 36, 13411584);
+    memcpy(raw + 5120, raw + 1024, SB_BYTES); assert(!decode(raw, &g));
+    assert(g.blocks % g.section_blocks == 256);
+    for (uint64_t delta = 512; delta <= 524288; delta += 512) {
+        uint64_t final = g.blocks - delta;
+        assert(!validate_target(&g, g.blocks, final, 1ULL << 30));
+        uint64_t argument = resize_argument(g.blocks, final, g.section_blocks);
+        assert(argument % g.section_blocks == 0);
+        assert(g.blocks - ((g.blocks - argument) / g.section_blocks) * g.section_blocks == final);
+        assert(validate_target(&g, g.blocks, final - 1, 0));
+    }
+    put64(raw + 1024 + 36, 0);
     memcpy(raw + 5120, raw + 1024, SB_BYTES); assert(decode(raw, &g));
     /* Exercise the actual compare/write/fsync/readback primitives on an owned
      * temporary regular file. Never open a system block device in this test. */

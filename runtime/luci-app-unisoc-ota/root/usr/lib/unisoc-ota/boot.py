@@ -1,6 +1,6 @@
 """Boot-v4 differential OTA support, including dynamic Android/Linux slot roles.
 
-Only Linux boot is written. Preserve its command line, slot bindings and boot
+Only Linux-slot startup containers are written. Preserve command lines, slot bindings and boot
 diagnostic area. A recovery hook runs before switch_root after an interrupted
 root transaction. No external LZ4 package is required on the device.
 """
@@ -23,6 +23,7 @@ if [ -s /newroot/etc/unisoc-ota/journal.json ] && grep -Eq '"status":"(applying|
     cp -a /newroot/etc/unisoc-ota/runtime/. "$ota_ram/" || exec /bin/sh
     mkdir -p "$ota_ram/target" "$ota_ram/dev" "$ota_ram/proc"
     mount --bind /newroot "$ota_ram/target" || exec /bin/sh
+    mount --bind /dev "$ota_ram/target/dev" || exec /bin/sh
     mount --bind /dev "$ota_ram/dev" || exec /bin/sh
     mount -t proc proc "$ota_ram/proc" || exec /bin/sh
     chroot "$ota_ram" /usr/bin/python3 /ota/engine.py recover --root /target || exec /bin/sh
@@ -249,7 +250,7 @@ def _role(name):
     return name in MU300_STORAGE or name.startswith('etc/misc-bc-') or name in (
         'etc/e5/android-slot', 'etc/e5/linux-slot', 'etc/e5/modem-slot',
         'etc/mu300/android-slot', 'etc/mu300/linux-slot', 'etc/linux-slot',
-        'etc/android-slot', 'lib/firmware/android-firmware-slot')
+        'etc/android-slot', 'etc/mu300-android-slot', 'lib/firmware/android-firmware-slot')
 
 
 class Binder:
@@ -259,7 +260,8 @@ class Binder:
         self.fields = metadata(current, family, lambda n: n == 'init' or _role(n))
         if 'init' not in self.fields: raise ValueError('Boot init missing')
         self.init = self.fields['init'][0].decode().replace('\r\n', '\n')
-        self.needs_guard = '# unisoc-ota-recovery-v2' not in self.init
+        self.needs_guard = ('# unisoc-ota-recovery-v2' not in self.init or
+                            'mount --bind /dev "$ota_ram/target/dev"' not in self.init)
         self.roles = {n:v for n,v in self.fields.items() if _role(n)}
         if family == 'mu300':
             # A release boot is TF-only; the installed device may use an
@@ -277,8 +279,15 @@ class Binder:
             values = metadata(image, self.family, lambda n:n == 'init')
             if 'init' not in values: raise ValueError('Boot init missing')
             init = values['init'][0].decode().replace('\r\n', '\n')
-        if '# unisoc-ota-recovery-v2' not in init:
-            anchor = '    log "stage=switch-root root='
+        if '# unisoc-ota-recovery-v2' in init:
+            old = '    mount --bind /newroot "$ota_ram/target" || exec /bin/sh'
+            if 'mount --bind /dev "$ota_ram/target/dev"' not in init:
+                if init.count(old) != 1: raise ValueError('Cannot migrate existing boot recovery hook')
+                init = init.replace(old, old+'\n    mount --bind /dev "$ota_ram/target/dev" || exec /bin/sh')
+        else:
+            anchor = ("log 'stage=switch-root platform=u30pro'" if
+                      '# U30PRO-MU300 storage bootstrap' in init else
+                      '    log "stage=switch-root root=')
             if init.count(anchor) != 1: raise ValueError('Cannot locate boot recovery hook')
             init = init.replace(anchor, HOOK+'\n'+anchor)
         roles = dict(self.roles); roles['init'] = (init.encode(), stat.S_IFREG|0o755)
@@ -449,3 +458,328 @@ def signature(path, family):
             result.update(block); remaining -= len(block)
         stream.seek(-64, os.SEEK_END); result.update(stream.read(64))
     return result.hexdigest()
+
+
+# U30 Pro uses the same MU300 root layout, with native Android-v4 containers.
+# Keep this codec in the shared runtime: installer, SSH updater and OTA must
+# assemble exactly the same ramdisk/DTB combination on every host platform.
+NATIVE_IMAGES = ('boot', 'vendor_boot', 'init_boot')
+
+
+def native_bounds(data, offset, size):
+    if not 0 <= offset <= len(data) or not 0 <= size <= len(data)-offset:
+        raise ValueError('Native boot extent exceeds its partition / 原生启动镜像范围越界')
+    return data[offset:offset+size]
+
+
+def native_footer(data):
+    if len(data) < 4096 or data[-64:-60] != b'AVBf':
+        raise ValueError('Native boot AVB container is missing / 原生启动镜像容器缺失')
+    original, offset, size = struct.unpack_from('>QQQ', data, len(data)-52)
+    if not size or original > offset or offset+size > len(data)-64:
+        raise ValueError('Invalid native boot footer / 原生启动镜像尾部范围无效')
+    return bytes(data[offset:offset+size]), bytes(data[-64:])
+
+
+def native_retain(template, payload):
+    metadata, footer = native_footer(template)
+    payload += bytes(-len(payload) % 4096)
+    end = len(payload)
+    if end+len(metadata)+64 > len(template):
+        raise ValueError('Native boot payload exceeds partition / 原生启动内容超出分区容量')
+    footer = bytearray(footer)
+    struct.pack_into('>QQQ', footer, 12, end, end, len(metadata))
+    return payload+metadata+bytes(len(template)-64-end-len(metadata))+bytes(footer)
+
+
+def native_boot_parts(data):
+    if (len(data) < 4096 or data[:8] != b'ANDROID!' or
+            struct.unpack_from('<I', data, 40)[0] != 4 or
+            struct.unpack_from('<I', data, 20)[0] != 1584):
+        raise ValueError('Native Android boot v4 required / 需要原生 Android v4 启动镜像')
+    native_footer(data)
+    kernel, ram = struct.unpack_from('<II', data, 8)
+    original = struct.unpack_from('>Q', data, len(data)-52)[0]
+    if 4096+((kernel+4095)&~4095)+ram > original:
+        raise ValueError('Native boot payload overlaps AVB metadata')
+    return (native_bounds(data, 4096, kernel),
+            native_bounds(data, 4096+((kernel+4095)&~4095), ram))
+
+
+def native_vendor_parts(data):
+    if len(data) < 4096 or data[:8] != b'VNDRBOOT' or struct.unpack_from('<II', data, 8) != (4, 4096):
+        raise ValueError('Native vendor_boot v4 required / 需要原生 vendor_boot v4')
+    native_footer(data)
+    ram_size = struct.unpack_from('<I', data, 24)[0]
+    dt_size = struct.unpack_from('<I', data, 2100)[0]
+    table_size, count, entry_size, bc_size = struct.unpack_from('<4I', data, 2112)
+    if not dt_size or (count, entry_size, table_size) != (1, 108, 108):
+        raise ValueError('Unsupported vendor ramdisk table / 不支持的厂商启动片段表')
+    dt = 4096+((ram_size+4095)&~4095)
+    table_at = dt+((dt_size+4095)&~4095)
+    original = struct.unpack_from('>Q', data, len(data)-52)[0]
+    if table_at+4096+bc_size > original:
+        raise ValueError('Vendor boot payload overlaps AVB metadata')
+    table = native_bounds(data, table_at, table_size)
+    size, offset = struct.unpack_from('<II', table)
+    if size != ram_size or offset:
+        raise ValueError('Invalid vendor ramdisk entry / 厂商启动片段范围不一致')
+    return (native_bounds(data, 4096, ram_size), native_bounds(data, dt, dt_size),
+            native_bounds(data, table_at+4096, bc_size), table)
+
+
+def native_image(canonical, templates, name):
+    if name not in NATIVE_IMAGES:
+        raise ValueError('Unknown native boot container')
+    kernel, ram = native_boot_parts(canonical)
+    command = bytes(canonical[44:1580])
+    if b'\0' not in command or command.split(b'\0',1)[0].split()[:1] != [b'loglevel=5'] or not kernel or not ram:
+        raise ValueError('Invalid MU300 canonical boot input')
+    template = templates[name]
+    header = bytearray(template[:4096])
+    if name == 'vendor_boot':
+        _, dtb, config, table = native_vendor_parts(template)
+        table = bytearray(table)
+        struct.pack_into('<I', table, 0, len(ram))
+        struct.pack_into('<I', header, 24, len(ram))
+        payload = (bytes(header)+ram+bytes(-len(ram)%4096)+dtb+
+                   bytes(-len(dtb)%4096)+table+bytes(-len(table)%4096)+config)
+    else:
+        before_kernel, _ = native_boot_parts(template)
+        if name == 'init_boot':
+            if before_kernel:
+                raise ValueError('Unexpected kernel in init_boot / init_boot 不应包含内核')
+            kernel, ram = b'', overlay({})
+        else:
+            header[44:1580] = command
+        struct.pack_into('<II', header, 8, len(kernel), len(ram))
+        struct.pack_into('<I', header, 1580, 0)
+        payload = bytes(header)+kernel+bytes(-len(kernel)%4096)+ram
+    return native_retain(template, payload)
+
+
+def native_images(canonical, templates):
+    return {name:native_image(canonical, templates, name) for name in NATIVE_IMAGES}
+
+
+def native_image_files(canonical, templates, destination, names=NATIVE_IMAGES):
+    """Map input containers; construct/write one output at a time, on disk."""
+    import contextlib
+    import mmap
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    with contextlib.ExitStack() as stack:
+        def mapped(path):
+            stream = stack.enter_context(Path(path).open('rb'))
+            return stack.enter_context(mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ))
+        source = mapped(canonical)
+        inputs = {name:mapped(path) for name,path in templates.items()}
+        outputs = {}
+        for name in names:
+            path = destination/(name+'.img')
+            content = native_image(source, inputs, name)
+            with path.open('xb') as stream:
+                stream.write(content); stream.flush(); os.fsync(stream.fileno())
+            del content
+            outputs[name] = path
+        return outputs
+
+
+def native_runtime(root, family):
+    marker = Path(root)/'etc/mu300/platform'
+    return family == 'mu300' and marker.is_file() and marker.read_text().strip() == 'u30pro'
+
+
+def native_hash(path):
+    h = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda:stream.read(1 << 20), b''): h.update(chunk)
+    return h.hexdigest()
+
+
+def native_size(path):
+    with Path(path).open('rb') as stream:
+        return stream.seek(0, os.SEEK_END)
+
+
+def native_prepare(root, family, backup, guard, final):
+    """Back up Linux companions before a durable OTA journal permits writes."""
+    import shutil
+    if not native_runtime(root, family): return []
+    root, backup = Path(root), Path(backup)
+    slot = linux_slot(root, family)
+    rows, templates = [], {}
+    for name in ('vendor_boot', 'init_boot'):
+        device = partition_device(root, name+'_'+slot)
+        original = backup/(name+'.img')
+        with device.open('rb') as source, original.open('xb') as target:
+            shutil.copyfileobj(source, target, 1 << 20); target.flush(); os.fsync(target.fileno())
+        templates[name] = original
+        rows.append(dict(name=name, device=device.relative_to(root).as_posix(),
+                         before=native_hash(original), size=native_size(original), backup=original.name))
+    for phase, canonical in (('guard', guard), ('final', final)):
+        if canonical is None: continue
+        if phase == 'final' and canonical == guard:
+            for row in rows:
+                row['final'],row['final_sha256']=row['guard'],row['guard_sha256']
+            continue
+        # All original formats are parsed before any partition write. No
+        # Android-slot templates or whole rootfs go into these containers.
+        outputs = native_image_files(canonical, templates, backup/('native-'+phase), names=templates)
+        for row in rows:
+            path = outputs[row['name']]
+            if native_size(path) != row['size']: raise ValueError('Native image capacity changed')
+            row[phase] = path.relative_to(backup).as_posix()
+            row[phase+'_sha256'] = native_hash(path)
+    return rows
+
+
+def native_row_paths(root, backup, row, phase):
+    import re
+    name = row.get('name')
+    if name not in ('vendor_boot', 'init_boot'):
+        raise ValueError('Unknown native boot recovery partition')
+    for key in ('before', 'guard_sha256', 'final_sha256'):
+        if key in row and not re.fullmatch('[a-f0-9]{64}', str(row[key])):
+            raise ValueError('Invalid native boot recovery checksum')
+    if type(row.get('size')) is not int or not 4096 <= row['size'] <= 256 << 20:
+        raise ValueError('Invalid native boot recovery capacity')
+    value = row.get('device', '')
+    if not isinstance(value, str) or not value.startswith('dev/') or '..' in Path(value).parts:
+        raise ValueError('Invalid native boot recovery device')
+    device = (Path(root)/value).resolve()
+    if not device.is_relative_to((Path(root)/'dev').resolve()) or native_size(device) != row['size']:
+        raise ValueError('Native boot recovery device/capacity changed')
+    expected = name+'.img' if phase == 'backup' else 'native-'+phase+'/'+name+'.img'
+    if phase == 'final' and row.get('final') == row.get('guard') and row.get('final_sha256') == row.get('guard_sha256'):
+        expected = 'native-guard/'+name+'.img'
+    if row.get(phase) != expected:
+        raise ValueError('Invalid native boot recovery file')
+    source = (Path(backup)/expected).resolve()
+    if not source.is_relative_to(Path(backup).resolve()):
+        raise ValueError('Native boot recovery file escapes transaction')
+    return device, source
+
+
+def native_scratch_bytes(root, family, has_incoming):
+    if not native_runtime(root, family): return 0
+    total = 0
+    slot = linux_slot(root, family)
+    for name in ('vendor_boot', 'init_boot'):
+        device = partition_device(root, name+'_'+slot)
+        size = native_size(device)
+        # Block devices report st_size=0 and need not support mmap. Inspection
+        # reads bounded headers/table/footer, not a whole 100 MiB partition.
+        with device.open('rb') as stream:
+            header=stream.read(4096);stream.seek(-64,os.SEEK_END);footer=stream.read(64)
+            if len(header)!=4096 or footer[:4]!=b'AVBf' or not 4096 <= size <= 256 << 20:
+                raise ValueError('Native template is incomplete: '+name)
+            original,avb,length=struct.unpack_from('>QQQ',footer,12)
+            if original!=avb or original<4096 or not length or avb+length>size-64:
+                raise ValueError('Invalid native template metadata: '+name)
+            if name == 'vendor_boot':
+                ram=struct.unpack_from('<I',header,24)[0];dt=struct.unpack_from('<I',header,2100)[0]
+                table,count,entry,config=struct.unpack_from('<4I',header,2112)
+                offset=4096+((ram+4095)&~4095)+((dt+4095)&~4095)
+                if (header[:8]!=b'VNDRBOOT' or struct.unpack_from('<II',header,8)!=(4,4096) or
+                        not ram or not dt or (table,count,entry)!=(108,1,108) or offset+4096+config>original):
+                    raise ValueError('Invalid vendor boot template')
+                stream.seek(offset);record=stream.read(108)
+                if len(record)!=108 or struct.unpack_from('<II',record)!=(ram,0):
+                    raise ValueError('Invalid vendor ramdisk extent')
+            elif (header[:8]!=b'ANDROID!' or struct.unpack_from('<I',header,40)[0]!=4 or
+                    struct.unpack_from('<I',header,8)[0] or 4096+struct.unpack_from('<I',header,12)[0]>original):
+                raise ValueError('Invalid init_boot template')
+        total += size*(3 if has_incoming else 2)
+    return total
+
+
+def native_write_file(device, image, expected):
+    """Full companion container write/readback; never used for boot diagnostics."""
+    device, image = Path(device), Path(image)
+    if native_hash(image) != expected or native_size(image) != native_size(device):
+        raise ValueError('Native recovery image checksum/capacity mismatch')
+    if native_hash(device) == expected: return
+    with image.open('rb') as source, device.open('r+b', buffering=0) as output:
+        for chunk in iter(lambda:source.read(1 << 20), b''):
+            if output.write(chunk) != len(chunk): raise OSError('Short native boot write')
+        os.fsync(output.fileno())
+    if native_hash(device) != expected: raise ValueError('Native boot readback mismatch')
+
+
+def native_commit(root, backup, rows, phase):
+    for row in rows:
+        if phase not in row: continue
+        device, image = native_row_paths(root, backup, row, phase)
+        allowed = [row['before'], row.get('guard_sha256'), row.get('final_sha256')]
+        if native_hash(device) not in allowed:
+            raise ValueError('Native boot changed during update: '+row['name'])
+        native_write_file(device, image, row[phase+'_sha256'])
+
+
+def native_restore(root, backup, rows):
+    for row in rows:
+        device, image = native_row_paths(root, backup, row, 'backup')
+        native_write_file(device, image, row['before'])
+
+
+def native_rollback_conflicts(root, backup, rows):
+    conflicts = []
+    for row in rows:
+        device, image = native_row_paths(root, backup, row, 'backup')
+        if native_hash(image) != row['before']:
+            raise ValueError('Native boot recovery backup corrupt: '+row['name'])
+        if native_hash(device) not in (row['before'], row.get('final_sha256')):
+            conflicts.append(dict(path=row['device'], fields=['boot']))
+    return conflicts
+
+
+def native_inspect_route(read, shell, slot):
+    """Bounded Android-side inspection; no filesystem mounts or writes."""
+    import re
+    if slot not in ('a', 'b'): raise ValueError('Native Linux slot is unknown')
+    sizes, headers, payload_ends = {}, {}, {}
+    def region(name, offset, length):
+        first, count = offset//4096, ((offset%4096)+length+4095)//4096
+        raw = read(f'dd if=/dev/block/by-name/{name}_{slot} bs=4096 skip={first} count={count} 2>/dev/null')
+        if len(raw) != count*4096: raise ValueError('Incomplete native boot inspection: '+name)
+        return raw[offset%4096:offset%4096+length]
+    for name in NATIVE_IMAGES:
+        sizes[name] = int(shell('blockdev --getsize64 /dev/block/by-name/'+name+'_'+slot).strip())
+        if sizes[name] < 4096 or sizes[name] % 4096: raise ValueError('Invalid native boot capacity')
+        headers[name] = region(name, 0, 4096)
+        footer = region(name, sizes[name]-4096, 4096)[-64:]
+        if footer[:4] != b'AVBf': raise ValueError('Native boot footer is unavailable: '+name)
+        original, avb, length = struct.unpack_from('>QQQ', footer, 12)
+        if original != avb or not length or original < 4096 or avb+length > sizes[name]-64:
+            raise ValueError('Native boot footer is invalid: '+name)
+        payload_ends[name] = original
+    boot, vendor, init = (headers[n] for n in NATIVE_IMAGES)
+    if boot[:8] != b'ANDROID!' or init[:8] != b'ANDROID!' or vendor[:8] != b'VNDRBOOT':
+        raise ValueError('Native boot container is missing')
+    if (struct.unpack_from('<II', vendor, 8) != (4, 4096) or
+            any(struct.unpack_from('<I', h, 40)[0] != 4 for h in (boot,init))):
+        raise ValueError('Native boot v4 headers differ')
+    kernel, ram = struct.unpack_from('<II', boot, 8)
+    vendor_ram = struct.unpack_from('<I', vendor, 24)[0]
+    if not kernel or not ram or ram != vendor_ram or 4096+((kernel+4095)&~4095)+ram > payload_ends['boot']:
+        raise ValueError('Native boot ramdisk copies differ')
+    dtb = struct.unpack_from('<I', vendor, 2100)[0]
+    table, count, entry, config = struct.unpack_from('<4I', vendor, 2112)
+    table_at = 4096+((vendor_ram+4095)&~4095)+((dtb+4095)&~4095)
+    if (not dtb or (table,count,entry) != (108,1,108) or table_at+4096+config > payload_ends['vendor_boot'] or
+            struct.unpack_from('<II', region('vendor_boot',table_at,108)) != (vendor_ram,0)):
+        raise ValueError('Native vendor ramdisk/DTB table is invalid')
+    def region_sha(name, offset, length):
+        first, count = offset//4096, (length+4095)//4096
+        value = shell(f'dd if=/dev/block/by-name/{name}_{slot} bs=4096 skip={first} count={count} 2>/dev/null | head -c {length} | sha256sum').split()
+        if not value or not re.fullmatch('[a-f0-9]{64}',value[0]): raise ValueError('Native ramdisk digest unavailable')
+        return value[0]
+    if region_sha('boot',4096+((kernel+4095)&~4095),ram) != region_sha('vendor_boot',4096,ram):
+        raise ValueError('Native boot/vendor_boot ramdisks are inconsistent / 原生启动 ramdisk 不一致')
+    init_kernel, init_ram = struct.unpack_from('<II', init, 8)
+    if init_kernel or not 0 < init_ram <= 65536 or 4096+init_ram > payload_ends['init_boot']:
+        raise ValueError('Native init_boot still contains Android startup')
+    if any(list(entries(archive)) for archive in archives(region('init_boot',4096,init_ram))):
+        raise ValueError('Native init_boot overrides Linux startup / init_boot 仍有覆盖 Linux 的启动内容')
+    return {'slot':slot,'ramdisk_sha256':region_sha('boot',4096+((kernel+4095)&~4095),ram)}

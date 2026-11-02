@@ -162,7 +162,7 @@ class Adapter:
     def confirm_mu300_model(self, text, platform=''):
         names = text.strip().splitlines()
         model, board = names[0] if names else '', names[1] if len(names)>1 else ''
-        profile, warning = mu300_android(model, board, platform)
+        profile, warning = mu300_android(model, board, platform, self.package['profile'])
         if warning:
             if not self.ctx:
                 raise ValueError('Review and confirm the model warning in the installation plan / 请先在安装计划中输入 yes 确认机型差异')
@@ -175,7 +175,7 @@ class Adapter:
         if not self.ctx:
             raise ValueError('Review the model warning in the update plan / 请先确认更新计划中的机型警告')
         actual = dict(self.ctx.record['device'], profile=profile, model=profile.upper(),
-                      model_mismatch=(mu300_runtime(profile) if self.package['adapter']=='mu300' else runtime_warning(self.package['profile'], profile)))
+                      model_mismatch=(mu300_runtime(profile,self.package['profile']) if self.package['adapter']=='mu300' else runtime_warning(self.package['profile'], profile)))
         require_approval(self.ctx.record, actual)
 
     def console_input_unavailable(self, *_args, **_kwargs):
@@ -346,7 +346,7 @@ class Adapter:
             self.legacy.LINUX_SLOT = 'b' if device['slot'] == '_a' else 'a'
         else:
             device['platform'] = properties['ro.board.platform']
-            device['profile'], warning = mu300_android(device['model'],device['board'],device['platform'])
+            device['profile'], warning = mu300_android(device['model'],device['board'],device['platform'],self.package['profile'])
             if warning: device['model_mismatch'] = warning
         # Trial boot uses only the boot signature, boot-chain check and misc.
         # Do not access the root filesystem to detect an installation.

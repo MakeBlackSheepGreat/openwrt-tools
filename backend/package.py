@@ -63,10 +63,18 @@ def inspect_package(directory):
         manifest = json.loads(mu.read_text(encoding='utf-8'))
         checks = {**manifest['magisk'], **manifest['desktop']}
         adapter, profile, layout, kernel = 'mu300', 'mu300-family', 'mu300root-container', manifest['kernel']
+        if manifest.get('platform') == 'u30pro':
+            profile = 'u30pro'
+            for item in ('desktop/native_u30pro.py', 'desktop/boot-runtime.py'):
+                if item not in checks:
+                    raise ValueError('Native boot adapter is not covered by package checksums / 原生启动适配文件未纳入安装包校验')
+                safe_file(root, item)
         mapping = manifest.get('magisk_layout', {})
         names = [mapping.get(n, n) for n in ('boot-linux.img', 'mu300-openwrt.tar.gz', 'busybox',
                                              'rootfs-critical.sha256', 'rootfs.requirements')]
         names += [n for n in checks if n.startswith('desktop/files/boot/repair/')]
+        if profile == 'u30pro':
+            names += ['desktop/native_u30pro.py', 'desktop/boot-runtime.py']
     else:
         profile_data = e5_profile(root)
         adapter, profile, layout, kernel = 'e5', profile_data['profile'], 'e5root-ext4', 'e5-boot-v2'
