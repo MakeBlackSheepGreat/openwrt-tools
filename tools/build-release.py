@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Run a native installer build with the shared workspace lock and durable logs."""
 import argparse
-import hashlib
 from datetime import datetime, timezone
 import json
 import os
