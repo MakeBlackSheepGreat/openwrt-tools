@@ -24,6 +24,8 @@ from backend.uninstall_growth import eligible, growth_tools, PreservationUnavail
 class Preservation(unittest.TestCase):
     def setUp(self):
         self.fx=fixtures.Journal();self.fx.setUp()
+        evidence=patch('backend.uninstall.inspect_installation',side_effect=lambda adapter,*a,**kw:fixtures.fixture_proof(adapter.kind))
+        evidence.start();self.addCleanup(evidence.stop)
     def tearDown(self):self.fx.tearDown()
     def fresh(self,kind='ext4'):
         fx=self.fx
@@ -43,7 +45,7 @@ class Preservation(unittest.TestCase):
             ctx=self.plan(kind)
             self.assertFalse(ctx.record['plan']['wipe'])
             self.assertEqual(ctx.record['plan']['data_action'],'grow-'+kind)
-            self.assertEqual(ctx.record['uninstall']['version'],2)
+            self.assertEqual(ctx.record['uninstall']['version'],3)
             Uninstaller(None,ctx,self.fx.adapter)
             self.assertFalse(any('of=' in call.args[0] for call in self.fx.adb.shell.call_args_list))
 

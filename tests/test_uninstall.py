@@ -84,6 +84,13 @@ def superblock(size, kind='ext4'):
     return bytes(data)
 
 
+def fixture_proof(family):
+    paths = ('etc/e5/part-root','etc/openwrt_release') if family == 'e5' else (
+        'openwrt/etc/mu300/desktop-mode','.mu300/boot-os','openwrt/etc/openwrt_release')
+    return dict(version=1,boot_header_sha256='a'*64,ramdisk_sha256='b'*64,
+                superblock_sha256='c'*64,markers={path:'d'*64 for path in paths})
+
+
 def boot(family):
     init='#!/bin/busybox sh\npersist() {\n    echo log\n}\nload_board_modules\n'
     init+='tf_update_probe\nmount_userdata\n' if family=='e5' else 'ROOT_OFFSET=27762098176\nmount_userdata\n'
@@ -182,7 +189,21 @@ class Journal(unittest.TestCase):
     def tearDown(self):self.temp.cleanup()
 
     def plan(self):
-        plan,metadata,files=prepare(self.adapter,self.store,self.device,authorize_reset=lambda _:True)
+        # Legacy saved-checkpoint fixtures still exercise backwards recovery.
+        # New device-based planning and real markers are covered separately in
+        # test_uninstall_evidence.py.
+        with patch('backend.uninstall.inspect_installation',return_value=fixture_proof(self.adapter.kind)):
+            plan,metadata,files=prepare(self.adapter,self.store,self.device,authorize_reset=lambda _:True)
+        after,data,root,expands=restored_layout(self.original,self.before,SECTORS,
+                                             'e5root' if self.adapter.kind=='e5' else 'mu300root')
+        plan.update(source_transaction=self.source['id'],layout_source='original_record',
+                    android_bytes=(data['end']-data['start']+1)*512,
+                    reclaimed_bytes=(data['end']-data['start']+1)*512-self.device['userdata_bytes'])
+        metadata['version']=2
+        if not expands:
+            plan.update(data_action='gap',wipe=False)
+            metadata.update(action='gap',reset_authorized=False)
+        files.update(zip(('after-first','after-last'),after))
         record=self.store.create(self.package,self.device,{'method':'uninstall'},plan)
         context=Context(self.store,record,lambda *_:None);persist(context,metadata,files)
         return context
@@ -196,7 +217,7 @@ class Journal(unittest.TestCase):
         commands=' '.join(str(call) for call in self.adb.shell.call_args_list)
         self.assertNotIn('dd ',commands);self.assertNotIn('of=',commands)
         (self.store.directory(self.source['id'])/'backup/gpt-first.bin').write_bytes(b'corrupt')
-        with self.assertRaisesRegex(RecoveryRequired,'original'):prepare(self.adapter,self.store,self.device)
+        with self.assertRaisesRegex(RecoveryRequired,'on this device'):prepare(self.adapter,self.store,self.device)
 
     def test_factory_gap_plan_does_not_reset_or_enlarge_android(self):
         self.configure('mu300','b',gap=True)
@@ -208,7 +229,7 @@ class Journal(unittest.TestCase):
 
     def test_missing_original_record_and_missing_device_evidence_stop_before_volume_reads(self):
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(RecoveryRequired,'original'):
+            with self.assertRaisesRegex(RecoveryRequired,'on this device'):
                 prepare(self.adapter,Store(directory),self.device)
         self.adb.shell.assert_not_called()
 

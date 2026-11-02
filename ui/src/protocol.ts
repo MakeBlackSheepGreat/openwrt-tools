@@ -9,7 +9,7 @@ export interface ModelPrompt {confirmation_required: 'model_mismatch'; model_tok
   warning: {expected_profile:string; expected_models:string[]; expected_board?:string|null; actual_model:string; actual_board?:string|null}}
 export interface Transaction {
   id: string; status: string; stage: string; device: Device; package: Package;
-  choices: {method: string; host?: string}; plan: {space?:SpaceInfo; boot_check?: {required:boolean; target:string; targets?:string[]; slot:string; reason?:string; root?:{kernel_release:string}; layout?:string}; wipe: boolean; data_action?: string; preservation_error?: string; layout_source?: 'original_record' | 'device'; root_layout?: string; root_offset_bytes?: number; released_unallocated_bytes?: number; shrink_strategy?: string; online_unavailable?: string; two_stage: boolean; offline?: boolean; openwrt_bytes: number; android_bytes?: number; previous_android_bytes?: number; reclaimed_bytes?: number; target: string; grow?: boolean; experimental?: boolean; gap_start?: number};
+  choices: {method: string; host?: string}; plan: {space?:SpaceInfo; boot_check?: {required:boolean; target:string; targets?:string[]; slot:string; reason?:string; root?:{kernel_release:string}; layout?:string}; wipe: boolean; data_action?: string; preservation_error?: string; layout_source?: 'original_record' | 'device'; continuing_removal?: boolean; root_layout?: string; root_offset_bytes?: number; released_unallocated_bytes?: number; shrink_strategy?: string; online_unavailable?: string; two_stage: boolean; offline?: boolean; openwrt_bytes: number; android_bytes?: number; previous_android_bytes?: number; reclaimed_bytes?: number; target: string; grow?: boolean; experimental?: boolean; gap_start?: number};
   online_fallback?: {state:'awaiting'|'confirmed'; nonce:string; reason:string};
   model_override?: {confirmation:'yes'; confirmed_at:number};
   nv_recovery?: {state:'awaiting'|'confirmed'; nonce:string; reason:string};
@@ -17,7 +17,7 @@ export interface Transaction {
   uninstall_armed?: boolean; completed: string[]; unsafe: boolean; updated: number; revision?: number;
   stage_started_at?: number; stage_finished_at?: number;
   details?: {host?: string; tool?: string; reboot_manually?: boolean; boot_confirmed?: boolean; verification_error?: string; connection_state?: string}; error?: {message: string; retryable: boolean; code: string};
-  result?: {expanded?:boolean;data_preserved?:boolean;reset_verified?:boolean;filesystem_bytes: number; url: string; backup_directory: string; temporary: boolean; uninstalled?: boolean; android_bytes?: number; reclaimed_bytes?: number; released_bytes?: number};
+  result?: {prior_data_identity_changed?:boolean;expanded?:boolean;data_preserved?:boolean;reset_verified?:boolean;filesystem_bytes: number; url: string; backup_directory: string; temporary: boolean; uninstalled?: boolean; android_bytes?: number; reclaimed_bytes?: number; released_bytes?: number};
 }
 export interface Transfer {name: string; bytes: number; total: number; bytes_per_second: number}
 export interface BackendEvent {type: string; data: unknown}

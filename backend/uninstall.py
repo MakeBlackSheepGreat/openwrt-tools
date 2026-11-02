@@ -1,4 +1,4 @@
-"""Journaled removal of a verified internal OpenWrt partition.
+"""Device-based removal of a verified internal OpenWrt partition.
 
 Planning never changes GPT, boot or userdata. An owned, idle OpenWrt filesystem
 may replay its journal before evidence is accepted. GPT changes run offline;
@@ -17,7 +17,7 @@ import uuid
 
 from . import gpt, storage as storage_io
 from .boot_image import inspect_linux_boot, trial_control
-from .state import Cancelled, RecoveryRequired, atomic_json, sha
+from .state import Cancelled, Context, DeviceLock, RecoveryRequired, atomic_json, sha
 from .transport import push_chunks
 from .uninstall_boot import build
 from .uninstall_growth import (PreservationUnavailable, eligible, growth_tools, base_boot,
@@ -187,42 +187,13 @@ def prepare(adapter, store, device, authorize_reset=None):
     current = (space['first'], space['last'])
     name = 'e5root' if adapter.kind == 'e5' else 'mu300root'
     region = adapter.kind == 'mu300' and storage.get('ROOT_LAYOUT') == mu300_region.LAYOUT
-    matches = []
-    for source in ([] if region else store.list()):
-        if (source['choices'].get('method') != 'part' or source['device'].get('cid') != device['cid'] or
-                source['package'].get('adapter') != adapter.kind or source['device'].get('profile') != device['profile']):
-            continue
-        try:
-            folder = store.directory(source['id'])/'backup'
-            sums = json.loads((folder/'checksums.json').read_text())
-            for filename in ('gpt-first.bin','gpt-last.bin','identity.json'):
-                if not 0 < (folder/filename).stat().st_size <= 2 << 20 or sha(folder/filename) != sums[filename]:
-                    raise ValueError('Damaged original backup')
-            identity = json.loads((folder/'identity.json').read_text())
-            if identity['cid'] != device['cid'] or identity['storage']['DISK_SIZE'] != total:
-                raise ValueError('Original backup identity differs')
-            original = ((folder/'gpt-first.bin').read_bytes(), (folder/'gpt-last.bin').read_bytes())
-            after, data, root, wipe = restored_layout(original, current, total, name)
-            if source['plan']['openwrt_bytes'] != (root['end']-root['start']+1)*512:
-                raise ValueError('Installed root allocation differs')
-            if not wipe and source['plan'].get('gap_start') != root['start']:
-                raise ValueError('Recorded unallocated-space location differs')
-            matches.append((source, after, data, root, wipe))
-        except (OSError, ValueError, KeyError, RecoveryRequired):
-            continue
-    # Conflicting historical layouts must be reviewed rather than guessed.
-    if matches and any(item[1] != matches[0][1] for item in matches[1:]):
-        raise RecoveryRequired('Original records disagree about Android capacity / 原安装记录对 Android 容量的记载冲突')
-    proof = None
-    if matches:
-        source, after, data, root, expands = matches[0]
+    # Installation history is not an input to removal. Old, conflicting or
+    # deleted records cannot change the extent that is actually on this disk.
+    if region:
+        after, data, root, expands = mu300_region.layout(current,total,storage['ROOT_START'],storage['ROOT_SIZE'])
     else:
-        if region:
-            after, data, root, expands = mu300_region.layout(current,total,storage['ROOT_START'],storage['ROOT_SIZE'])
-        else:
-            after, data, root, expands = device_layout(current,total,name)
-        proof = inspect_installation(adapter,device,root,recovery_store=store)
-        source = None
+        after, data, root, expands = device_layout(current,total,name)
+    proof = inspect_installation(adapter,device,root,recovery_store=store)
     node = storage_io.disk_node(storage['NODE'])
     if (storage['ROOT'] != (node if region else storage_io.part_node(node,root['n'])) or storage['START'] != data['start'] or
             storage['SIZE']*512 != device['userdata_bytes']):
@@ -273,10 +244,10 @@ def prepare(adapter, store, device, authorize_reset=None):
             'android_bytes':(data['end']-data['start']+1)*512,
             'previous_android_bytes':device['userdata_bytes'],
             'reclaimed_bytes':(data['end']-data['start']+1)*512-device['userdata_bytes'],
-            'source_transaction':source['id'] if source else None,
-            'layout_source':'original_record' if source else 'device',
+            'source_transaction':None,
+            'layout_source':'device',
             'released_unallocated_bytes':0 if expands else (root['end']-root['start']+1)*512}
-    metadata = {'version':4 if region else 2 if source else 3,'action':action,'reset_authorized':wipe,'total':total,'front':space['front'],'tail':space['tail'],
+    metadata = {'version':4 if region else 3,'action':action,'reset_authorized':wipe,'total':total,'front':space['front'],'tail':space['tail'],
                 'tool_hashes':{name:hashlib.sha256(content).hexdigest() for name,content in tools.items()},
                 'root_start':root['start'],'root_size':root['end']-root['start']+1,
                 'nodes':{p['name']:storage_io.part_node(node,p['n']) for p in space['parts']
@@ -301,11 +272,60 @@ def persist(context, metadata, files):
     context.store.save(context.record)
 
 
+def pending_removal(service, adapter, device, header):
+    """Find this device's unfinished removal without a record-picker workflow.
+
+    Only recovery checkpoints are consulted, never installation history. Match
+    exact disk snapshots and hardware identity before offering continuation.
+    A stale checkpoint from an earlier install must not adopt a fresh install.
+    """
+    candidates = [r for r in service.store.list()
+                  if r['choices'].get('method') == 'uninstall' and r['status'] != 'completed'
+                  and r['effects'].get('uninstall-arm')
+                  and r['package'].get('adapter') == adapter.kind
+                  and r['package'].get('profile') == service.package.get('profile')
+                  and all(r['device'].get(k) == device.get(k) for k in ('cid','profile','slot'))]
+    if not candidates:
+        return None
+    # Every executing installer holds the same storage-identity lock. Do not
+    # overwrite a checkpoint while another process is still writing it.
+    with DeviceLock(service.store.base,device['cid']):
+        return _pending_removal(service,adapter,device,header,candidates)
+
+
+def _pending_removal(service, adapter, device, header, candidates):
+    current = adapter.read_gpt(device['storage'])
+    snapshots = (current['first'], current['last'])
+    maintenance = b'openwrt.uninstall=1' in header[44:1580].split(b'\0',1)[0].split()
+    for record in candidates:
+        try:
+            worker = Uninstaller(None, Context(service.store,record,lambda *_:None), adapter)
+            if (storage_io.disk_node(record['device']['storage']['NODE']) !=
+                    storage_io.disk_node(device['storage']['NODE']) or
+                    record['device']['storage']['DISK_SIZE'] != device['storage']['DISK_SIZE']):
+                continue
+            after = snapshots == (worker.files['after-first'], worker.files['after-last'])
+            before = snapshots == (worker.files['before-first'], worker.files['before-last'])
+            if not (after and not device.get('existing') or before and maintenance):
+                continue
+        except (OSError, ValueError, KeyError, RecoveryRequired):
+            continue
+        record['device']['serial'] = device['serial']
+        record['package'] = service.package
+        record['uninstall_recheck'] = True
+        record['plan']['continuing_removal'] = True
+        record.update(status='ready',stage='plan',error=None,cancel_requested=False)
+        service.store.save(record)
+        return record
+    return None
+
+
 class Uninstaller:
     def __init__(self, service, context, adapter):
         self.service, self.ctx, self.adapter = service, context, adapter
         self.r = context.record
-        self.resume_growth = self.r.get('status') in ('failed','cancelled') and bool(self.r.get('uninstall_growth_pending'))
+        self.resume_growth = (bool(self.r.get('uninstall_recheck')) or
+                              self.r.get('status') in ('failed','cancelled') and bool(self.r['effects'].get('uninstall-arm')))
         self.meta = self.r['uninstall']
         self.folder = context.directory/'uninstall'
         self.files = {}
@@ -563,9 +583,20 @@ class Uninstaller:
         if armed and armed['state'] != 'done':
             armed = self.recover_arm()
         if not armed:
-            device = self.ready()
-            if device.get('readiness') != 'ready':
-                raise RecoveryRequired('Android/root is not ready; no uninstall request written / Android 或 root 尚未就绪，未写入卸载请求')
+            while True:
+                self.ctx.boundary()
+                try:
+                    device = self.ready()
+                    readiness = device.get('readiness','android_boot')
+                    if readiness == 'ready':
+                        break
+                    self.ctx.stage(readiness,'waiting_device' if readiness == 'android_boot' else 'waiting_user')
+                except (ConnectionError,OSError,TimeoutError,subprocess.TimeoutExpired):
+                    self.ctx.stage('android_boot','waiting_device')
+                if self.service is None:
+                    raise RecoveryRequired('Android/root is not ready; no uninstall request written / Android 或 root 尚未就绪，未写入卸载请求')
+                if self.service.stop.wait(3):
+                    raise Cancelled()
             if self.layout_state() != 'before':
                 raise RecoveryRequired('Unconfirmed layout changed; create a new plan')
             self.arm(device)
@@ -601,7 +632,8 @@ class Uninstaller:
                 return self.run()
         if self.resume_growth:
             self.resume_growth = False
-            if self.rearm_growth(device):
+            self.r.pop('uninstall_recheck',None)
+            if self.meta.get('action','').startswith('grow-') and self.rearm_growth(device):
                 return self.run()
         if (self.meta.get('action') == 'grow-android-f2fs' and
                 not self.r.get('uninstall_android_growth_attempted')):
@@ -624,14 +656,26 @@ class Uninstaller:
         if self.meta['action'] == 'grow-android-f2fs':
             volume = inspect_android_growth(self.adapter,device,volume)
         preservation_eligible(device,volume,self.meta['action'])
-        if volume['uuid'] != self.meta['volume']['uuid']:
-            raise RecoveryRequired('Android filesystem identity changed / Android 文件系统身份已变化')
+        baseline = self.r.get('uninstall_current_volume', self.meta['volume'])
+        if volume['uuid'] != baseline['uuid']:
+            # GPT removal has already completed. Do not compare a new Android
+            # filesystem against an old transaction forever. A full, valid
+            # current filesystem only needs finalization. For a short F2FS
+            # filesystem, stock Android's worker is rebuilt for its live UUID.
+            if volume['filesystem_bytes'] < self.r['plan']['android_bytes']-(4 << 20) and self.meta['action'] != 'grow-android-f2fs':
+                raise RecoveryRequired('Current Android filesystem needs a new offline growth plan / 当前 Android 文件系统需要重新生成离线扩容计划')
+            self.r['uninstall_identity_changed'] = True
+            self.ctx.log('Android filesystem identity differs from the old checkpoint; verifying the current filesystem. Earlier data preservation cannot be confirmed. / Android 文件系统与旧检查点不同，按当前文件系统继续核验，无法确认此前的数据保留情况。',level='warning',scope='uninstall')
+        self.r['uninstall_current_volume'] = volume
+        self.ctx.store.save(self.r)
         if volume['filesystem_bytes'] >= self.r['plan']['android_bytes']-(4 << 20):
             self.r['uninstall_growth_pending']=False;self.ctx.store.save(self.r)
             return False
         if self.meta['action'] == 'grow-android-f2fs':
             android_growth_boot.stage(self,device,volume)
             return True
+        if self.meta['action'] != 'grow-'+volume['filesystem']:
+            raise RecoveryRequired('Current filesystem requires different growth tools / 当前文件系统需要不同的扩容工具')
         slot = device['slot'].removeprefix('_'); other = 'b' if slot == 'a' else 'a'
         values = adb.shell('sha256sum /dev/block/by-name/boot_'+slot+' /dev/block/by-name/boot_'+other,root=True).splitlines()
         expected = (self.r.get('uninstall_android_sha256'),self.r.get('uninstall_boot_sha256'))
@@ -753,7 +797,8 @@ class Uninstaller:
             if self.meta['action'] == 'grow-android-f2fs':
                 volume = inspect_android_growth(self.adapter,device,volume)
             preservation_eligible(device,volume,self.meta['action'])
-            if volume['uuid'] != self.meta['volume']['uuid']:
+            baseline = self.r.get('uninstall_current_volume',self.meta['volume'])
+            if volume['uuid'] != baseline['uuid']:
                 raise RecoveryRequired('Preserved Android filesystem identity differs / 保留的 Android 文件系统身份不符')
             if volume['mapped_bytes']-volume['filesystem_bytes'] > 4 << 20:
                 self.r['uninstall_growth_pending']=True;self.ctx.store.save(self.r)
@@ -784,7 +829,8 @@ class Uninstaller:
         self.r['result'] = {'uninstalled':True,'filesystem_bytes':volume['filesystem_bytes'],
                             'android_bytes':device['userdata_bytes'],'reclaimed_bytes':self.r['plan']['reclaimed_bytes'],
                             'released_bytes':self.r['plan']['openwrt_bytes'],
-                            'backup_directory':str(self.ctx.directory/'backup'),'url':'','temporary':False}
+                            'backup_directory':str(self.ctx.directory/'backup'),'url':'','temporary':False,
+                            'prior_data_identity_changed':bool(self.r.get('uninstall_identity_changed'))}
         self.ctx.stage('complete','completed')
 
     def finish_boot(self, device, *, bcb=None):

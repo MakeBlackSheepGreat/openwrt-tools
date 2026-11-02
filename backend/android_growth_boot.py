@@ -190,8 +190,8 @@ def scripts(record, adapter, volume, android_sha, *, operation='uninstall', cont
     node = record['device']['storage']['NODE']
     disk = storage.disk_node(node)
     target = record['plan']['android_bytes']
-    before = record[operation]['volume']['filesystem_bytes']
-    uuid = record[operation]['volume']['uuid']
+    before = volume['filesystem_bytes']
+    uuid = volume['uuid']
     if not re.fullmatch('[a-f0-9]{32}', uuid) or target % 512 or before <= 0 or target <= before:
         raise ValueError('Invalid Android growth geometry')
     proof = volume['android_growth']

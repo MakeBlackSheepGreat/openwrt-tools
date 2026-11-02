@@ -317,5 +317,5 @@ def inspect_installation(adapter, device, root, *, boot_backup=None, recovery_st
             proof['region_header_sha256'] = hashlib.sha256(read(0,4096)).hexdigest()
         return proof
     except (ValueError,KeyError,TypeError,struct.error) as error:
-        raise RecoveryRequired('Cannot verify the installed OpenWrt partition without original backups / '
-                               '没有原备份，且无法核实设备上的 OpenWrt 安装；已停止: '+str(error)) from error
+        raise RecoveryRequired('Cannot verify the OpenWrt installation on this device / '
+                               '无法核实设备上的 OpenWrt 安装；分区布局未修改: '+str(error)) from error

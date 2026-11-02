@@ -153,13 +153,13 @@ class NoOriginalRecord(unittest.TestCase):
         self.assertEqual(ctx.record['plan']['android_bytes'],28*fx.GIB)
         Uninstaller(None,ctx,self.fixture.adapter)
 
-    def test_matching_original_backup_is_preferred(self):
-        self.fixture.device.update(encrypted=True,encryption_state='encrypted')
-        with patch('backend.uninstall.inspect_installation',side_effect=AssertionError('unnecessary evidence scan')):
-            ctx=self.fixture.plan()
-        self.assertEqual(ctx.record['plan']['layout_source'],'original_record')
+    def test_matching_original_backup_cannot_bypass_device_inspection(self):
+        f=self.fixture
+        with patch('backend.uninstall.inspect_installation',side_effect=RecoveryRequired('current root is invalid')):
+            with self.assertRaisesRegex(RecoveryRequired,'current root'):
+                prepare(f.adapter,f.store,f.device)
 
-    def test_conflicting_valid_originals_cannot_be_bypassed_by_device_fallback(self):
+    def test_conflicting_originals_do_not_block_device_based_removal(self):
         f=self.fixture
         source=f.store.list()[0];folder=f.store.directory(source['id'])/'backup'
         changed=bytearray(f.original[0][1024:]);end=struct.unpack_from('<Q',changed,3*128+40)[0]
@@ -168,8 +168,12 @@ class NoOriginalRecord(unittest.TestCase):
         sums=json.loads((folder/'checksums.json').read_text())
         for name in ('gpt-first.bin','gpt-last.bin'):sums[name]=hashlib.sha256((folder/name).read_bytes()).hexdigest()
         (folder/'checksums.json').write_text(json.dumps(sums))
-        with patch('backend.uninstall.inspect_installation',side_effect=AssertionError('conflict bypass')),self.assertRaisesRegex(RecoveryRequired,'disagree'):
-            prepare(f.adapter,f.store,f.device)
+        with patch('backend.uninstall.growth_tools',return_value={'tool':b'fixture'}),patch('backend.uninstall.base_boot'),patch('backend.uninstall.build'):
+            plan,meta,_=prepare(f.adapter,f.store,f.device)
+        self.assertEqual(plan['layout_source'],'device')
+        self.assertIsNone(plan['source_transaction'])
+        self.assertEqual(meta['version'],3)
+        self.assertEqual(plan['android_bytes'],32*fx.GIB)
 
     def test_damaged_original_backup_can_use_fresh_verified_device_evidence(self):
         f=self.fixture

@@ -48,7 +48,7 @@ class PreMount(unittest.TestCase):
         self.adapter.root = Path(self.fx.temp.name)
         self.adapter.adb.shell = Mock(return_value='a'*64+'  /system/bin/fsck.f2fs')
         self.adapter.adb.call = Mock()
-        self.volume = {'android_growth':{'resizer_sha256':'b'*64}}
+        self.volume = {'uuid':'55'*16,'filesystem_bytes':28*fx.GIB,'android_growth':{'resizer_sha256':'b'*64}}
         # A successful Android A control, with an inactive low-priority slot.
         raw = bytearray(32); raw[:8]=b'_a\0\0BCAB'; raw[8]=1;raw[9]=2;raw[12]=0x9f;raw[14]=0x1e
         import zlib
@@ -59,6 +59,14 @@ class PreMount(unittest.TestCase):
 
     def rendered(self):
         return growth.scripts(self.record, self.adapter, self.volume, 'c'*64)
+
+    def test_recheck_uses_live_identity_and_size_instead_of_old_transaction(self):
+        self.volume.update(uuid='66'*16,filesystem_bytes=29*fx.GIB)
+        files=self.rendered()
+        text='\n'.join(v.decode() for v in files.values() if isinstance(v,bytes))
+        self.assertIn('66'*16,text)
+        self.assertNotIn('55'*16,text)
+        self.assertIn(str(29*fx.GIB),text)
 
     def test_split_android_growth_scripts_restore_init_boot_only_on_actual_slot(self):
         for slot in ('a','b'):

@@ -20,7 +20,7 @@ from .package import inspect_package
 from . import storage as storage_io
 from .state import Cancelled, Context, DeviceLock, Pending, RecoveryRequired, NVConfirmationRequired, Store, compatible
 from .transport import Adb, wireless_serial
-from .uninstall import Uninstaller, prepare as prepare_uninstall, persist as persist_uninstall
+from .uninstall import Uninstaller, prepare as prepare_uninstall, persist as persist_uninstall, pending_removal
 from .uninstall_growth import PreservationUnavailable
 from .online_shrink import OnlineShrink, OnlineDecision, inspect as inspect_online, allocation as online_allocation, fallback_plan
 from .model_compat import decision as model_decision, runtime_warning, mu300_runtime, require_approval
@@ -330,8 +330,15 @@ class Service:
                 header = probe_adapter.adb.read('dd if=/dev/block/by-name/boot_'+other+' bs=512 count=8 2>/dev/null')
                 if len(header) != 4096:
                     raise ValueError('Incomplete opposite boot header / 另一启动槽读取不完整')
+                if choices.get('method') == 'uninstall':
+                    recovered = pending_removal(self,uninstall_adapter,device,header)
+                    if recovered:
+                        if model_approval:
+                            recovered['model_override'] = model_approval
+                            self.store.save(recovered)
+                        return self.public(recovered)
                 pending = any(item['device'].get('cid') == device.get('cid') and item['status'] != 'completed' and
-                              (item['choices'].get('method') == 'uninstall' and item['effects'].get('uninstall-arm') or
+                              (choices.get('method') != 'uninstall' and item['choices'].get('method') == 'uninstall' and item['effects'].get('uninstall-arm') or
                                item['choices'].get('method') == 'expand' and item['effects'].get('expand-gpt')) for item in self.store.list())
                 if pending or b'openwrt.uninstall=1' in header[44:1580].split(b'\0',1)[0].split():
                     raise RecoveryRequired('Storage maintenance is already pending. Resume/import its saved record; do not create another operation. / 已有未完成的存储维护，请继续或导入原记录，不要创建新操作。')

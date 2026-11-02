@@ -22,6 +22,8 @@ def elf(extra=b''):
 class AndroidGrowth(unittest.TestCase):
     def setUp(self):
         self.fx=fx.Journal();self.fx.setUp();self.fx.configure('mu300','a')
+        evidence=patch('backend.uninstall.inspect_installation',side_effect=lambda adapter,*a,**kw:fx.fixture_proof(adapter.kind))
+        evidence.start();self.addCleanup(evidence.stop)
         self.device=self.fx.device
         self.device.update(encrypted=True,encryption_state='encrypted',encryption_type='file')
         self.volume={'source':'/dev/block/dm-39','mapped_bytes':28*fx.GIB,
@@ -129,6 +131,32 @@ class AndroidGrowth(unittest.TestCase):
         with patch('backend.uninstall.android_volume',return_value=foreign),patch.object(worker,'finish_boot',side_effect=AssertionError('foreign cleanup')):
             with self.assertRaisesRegex(RecoveryRequired,'identity'):worker.finish(device)
         self.fx.adb.call.assert_not_called()
+
+    def test_explicit_recheck_finalizes_the_already_grown_current_filesystem(self):
+        context=self.plan();worker=Uninstaller(None,context,self.fx.adapter)
+        device={**self.device,'existing':False,'userdata_bytes':32*fx.GIB}
+        current={**self.volume,'mapped_bytes':32*fx.GIB,'filesystem_bytes':32*fx.GIB,'uuid':'66'*16}
+        with patch('backend.uninstall.android_volume',return_value=current),\
+             patch.object(worker,'layout_state',return_value='after'),\
+             patch('backend.uninstall.android_growth_boot.stage') as stage,\
+             patch.object(worker,'finish_boot'):
+            self.assertFalse(worker.rearm_growth(device))
+            worker.finish(device)
+        stage.assert_not_called()
+        self.assertTrue(context.record['result']['prior_data_identity_changed'])
+        self.assertEqual(context.record['status'],'completed')
+
+    def test_pending_growth_is_rebuilt_for_the_live_uuid_without_changing_original_backup(self):
+        context=self.plan();worker=Uninstaller(None,context,self.fx.adapter)
+        device={**self.device,'existing':False,'userdata_bytes':32*fx.GIB}
+        current={**self.volume,'mapped_bytes':32*fx.GIB,'uuid':'66'*16}
+        with patch('backend.uninstall.android_volume',return_value=current),\
+             patch.object(worker,'layout_state',return_value='after'),\
+             patch('backend.uninstall.android_growth_boot.stage') as stage:
+            self.assertTrue(worker.rearm_growth(device))
+        self.assertEqual(stage.call_args.args[2]['uuid'],'66'*16)
+        self.assertEqual(context.record['uninstall']['volume']['uuid'],'55'*16)
+        self.assertEqual(context.record['uninstall_current_volume']['uuid'],'66'*16)
 
 
 if __name__=='__main__':unittest.main()

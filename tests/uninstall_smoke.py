@@ -26,7 +26,7 @@ window.__TAURI_INTERNALS__.invoke=async(command,args={})=>{
    const plan={...result.plan,method:'uninstall',wipe,data_action:preserve==='android'?'grow-android-f2fs':preserve?'grow-ext4':wipe?'reset':'gap',two_stage:true,offline:true,grow:false,
      target:'mmcblk0p5',previous_android_bytes:28*1073741824,android_bytes:((wipe||preserve)?32:28)*1073741824,
      openwrt_bytes:4*1073741824,reclaimed_bytes:(wipe||preserve)?4*1073741824:0,
-     layout_source:window.__fixture.layoutSource,released_unallocated_bytes:(wipe||preserve)?0:4*1073741824};
+     layout_source:window.__fixture.layoutSource,continuing_removal:preserve==='android',released_unallocated_bytes:(wipe||preserve)?0:4*1073741824};
    window.__fixture.tx.plan=plan;result.plan=plan;
  }
  if(command==='backend_request' && args.command==='start'){
@@ -87,7 +87,9 @@ def main(url='http://127.0.0.1:1420'):
             assert page.locator('.plan-list').get_by_text('4.00 GiB',exact=True).count()>=1
             assert page.locator('.confirmation').count()==1
             if basis=='device':
-                page.get_by_text('未找到可用的原安装备份' if zh else 'No usable original installation backup',exact=False).wait_for()
+                text=('已自动识别上次卸载的进度' if zh else 'The previous removal progress was detected automatically') if preserve=='android' else (
+                    '按设备当前布局卸载' if zh else 'Removal follows the current device layout')
+                page.get_by_text(text,exact=False).wait_for()
             if not wipe and not preserve:
                 page.locator('.plan-list').get_by_text('释放为空闲的空间' if zh else 'Space released as unallocated',exact=True).wait_for()
             assert page.get_by_text(('保留 Android 数据' if zh else 'Preserve Android data') if preserve=='android' else '保留 Android 数据' if preserve else '全部清空' if zh else 'All Android apps' if wipe else 'Android userdata is not enlarged',exact=False).count()>=1
@@ -103,10 +105,12 @@ def main(url='http://127.0.0.1:1420'):
             page.get_by_text('不会撤回设备上的卸载或已确认的重置' if zh else 'does not withdraw device removal or an approved reset',exact=False).wait_for()
             assert 'verify_openwrt' not in page.evaluate('window.__fixture.requests')
             page.evaluate('''() => window.__emitFixture({stage:'complete',status:'completed',
-              result:{uninstalled:true,filesystem_bytes:32*1073741824,url:''}})''');settle(page)
+              result:{uninstalled:true,filesystem_bytes:32*1073741824,url:'',prior_data_identity_changed:window.__fixture.removePreserve==='android'}})''');settle(page)
             page.get_by_role('heading',name='OpenWrt 已卸载并完成容量验证' if zh else 'OpenWrt removed and capacity verified').wait_for()
             assert page.locator('.login-hint').count()==0
             assert not page.locator('.success-panel').get_by_text('管理地址' if zh else 'Management address',exact=True).count()
+            if preserve=='android':
+                page.locator('.success-panel').get_by_text('当前 Android 文件系统与旧检查点不同' if zh else 'The current Android filesystem differs from the old checkpoint',exact=False).wait_for()
             layout(page)
             if zh:page.screenshot(path=str(output/'uninstall-complete-zh.png'))
             page.evaluate("() => window.__emitFixture({stage:'uninstall_offline',status:'cancelled'})");settle(page)
