@@ -75,6 +75,23 @@ class OnlineTests(unittest.TestCase):
             with self.subTest(offset=offset),self.assertRaises(ValueError):superblocks(raw)
         with self.assertRaises(ValueError):superblocks(sb()[:-1])
 
+    def test_superblock_copies_may_differ_in_the_kernel_version_and_its_crc_only(self):
+        # struct f2fs_super_block: version[256] at 0x684, the crc over the block in its last 4 bytes. Every byte of
+        # either copy changed alone is refused, but for those.
+        for copy in (1024,5120):
+            for i in range(3072):
+                raw=bytearray(sb());raw[copy+i]^=0x5a;ignored=0x684<=i<0x784 or i>=3068
+                with self.subTest(copy=copy,offset=i):
+                    if ignored:self.assertEqual(superblocks(raw)['blocks'],3932160)
+                    else:
+                        with self.assertRaises(ValueError):superblocks(raw)
+        # what a U30 Air had: the primary names the running kernel, the backup an older build, and the crcs differ
+        raw=bytearray(sb())
+        raw[1024+0x684:1024+0x684+33]=b'5.4.254-android12-9-g35e7b2480b7a'
+        raw[5120+0x684:5120+0x684+33]=b'5.4.254-android12-9-g7463324543ed'
+        struct.pack_into('<I',raw,1024+3068,0x11111111);struct.pack_into('<I',raw,5120+3068,0x22222222)
+        self.assertEqual(superblocks(raw)['blocks'],3932160)
+
     def test_prefer_online_but_keep_explicit_format_and_existing_free_space(self):
         for kind in ('e5','mu300'):
             for slot in ('_a','_b'):

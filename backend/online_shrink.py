@@ -25,11 +25,23 @@ class OnlineDecision(Exception):
     """No data was changed; an explicit new erase-data plan may be requested."""
 
 
+# struct f2fs_super_block holds the kernel's own version string (`version`, 256 bytes at 0x684) and, with the
+# sb_chksum feature, a crc over the whole block in its last 4 bytes. The two copies may carry different version
+# strings (seen on a U30 Air whose kernel had been replaced: the primary named the running kernel, the backup an
+# older build, and nothing else differed), and then their crcs differ too. Neither says anything about the
+# filesystem, so the copies are compared on every byte but those (device/f2fs-online.c does the same).
+SB_VERSION, SB_VERSION_END, SB_CRC = 0x684, 0x784, 3072-4
+
+
+def same_superblock(a, b):
+    return a[:SB_VERSION] == b[:SB_VERSION] and a[SB_VERSION_END:SB_CRC] == b[SB_VERSION_END:SB_CRC]
+
+
 def superblocks(raw):
     if len(raw) != 8192:
         raise ValueError('Incomplete F2FS superblocks / F2FS 超级块读取不完整')
     a, b = raw[1024:4096], raw[5120:8192]
-    if a != b or a[:4] != bytes.fromhex('1020f5f2') or struct.unpack_from('<II', a, 16) != (12, 9):
+    if not same_superblock(a, b) or a[:4] != bytes.fromhex('1020f5f2') or struct.unpack_from('<II', a, 16) != (12, 9):
         raise ValueError('F2FS superblocks disagree or are unsupported / F2FS 主备超级块不一致或格式不支持')
     sections = struct.unpack_from('<I', a, 24)[0]
     blocks = struct.unpack_from('<Q', a, 36)[0]
