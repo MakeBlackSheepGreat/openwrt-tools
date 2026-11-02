@@ -41,6 +41,47 @@ int main(void)
         memcpy(raw, saved, sizeof(raw)); put32(raw + 1024 + 24, sections);
         memcpy(raw + 5120, raw + 1024, SB_BYTES); assert(decode(raw, &g));
     }
+    /* The copies may differ in the kernel's version string and the crc that covers it, and in nothing else: every
+     * byte of either copy changed alone is refused, but for those. */
+    for (int copy = 0; copy < 2; copy++)
+        for (unsigned i = 0; i < SB_BYTES; i++) {
+            bool ignored = (i >= SB_VERSION && i < SB_VERSION + SB_VERSION_BYTES) || i >= SB_CRC;
+            memcpy(raw, saved, sizeof(raw)); raw[(copy ? 5120 : 1024) + i] ^= 0x5a;
+            assert(!decode(raw, &g) == ignored);
+            if (ignored) assert(g.blocks == 29008896 && g.section_blocks == 512);
+        }
+    /* what a U30 Air had: the primary names the running kernel, the backup an older build (and, with sb_chksum, the
+     * crcs differ); the geometry is the primary's and the same in both */
+    memcpy(raw, saved, sizeof(raw));
+    memcpy(raw + 1024 + SB_VERSION, "5.4.254-android12-9-g35e7b2480b7a", 33);
+    memcpy(raw + 5120 + SB_VERSION, "5.4.254-android12-9-g7463324543ed", 33);
+    put32(raw + 1024 + SB_CRC, 0x11111111); put32(raw + 5120 + SB_CRC, 0x22222222);
+    assert(!decode(raw, &g)); assert(g.blocks == 29008896 && g.section_blocks == 512);
+    /* Different version strings with independently valid checksums are OK. */
+    for (int copy = 0; copy < 2; copy++) {
+        unsigned char *sb = raw + (copy ? 5120 : 1024);
+        put32(sb + SB_FEATURE, SB_CHKSUM); put32(sb + 32, SB_CRC);
+        put32(sb + SB_CRC, superblock_crc(sb));
+    }
+    assert(!decode(raw, &g));
+    assert(le32(raw + 1024 + SB_CRC) != le32(raw + 5120 + SB_CRC));
+    unsigned char checked[8192]; memcpy(checked, raw, sizeof(raw));
+    for (int copy = 0; copy < 2; copy++) {
+        for (unsigned i = 0; i < SB_BYTES; i++) {
+            memcpy(raw, checked, sizeof(raw)); raw[(copy ? 5120 : 1024) + i] ^= 0x5a;
+            assert(decode(raw, &g));
+        }
+        memcpy(raw, checked, sizeof(raw));
+        unsigned char *sb = raw + (copy ? 5120 : 1024);
+        put32(sb + 32, SB_CRC - 4); put32(sb + SB_CRC, superblock_crc(sb));
+        assert(decode(raw, &g));
+    }
+    memcpy(raw, checked, sizeof(raw)); raw[1024 + SB_VERSION + SB_VERSION_BYTES] ^= 1;
+    put32(raw + 1024 + SB_CRC, superblock_crc(raw + 1024));
+    assert(decode(raw, &g)); /* init_version must match even with valid CRCs */
+    memcpy(raw, checked, sizeof(raw));
+    raw[1024 + SB_VERSION] ^= 1; raw[5120 + SB_VERSION] ^= 1;
+    assert(decode(raw, &g)); /* stale CRCs on both copies */
     memcpy(raw, saved, sizeof(raw)); put64(raw + 1024 + 36, 29008895);
     memcpy(raw + 5120, raw + 1024, SB_BYTES); assert(decode(raw, &g));
     /* Exercise the actual compare/write/fsync/readback primitives on an owned
@@ -54,6 +95,6 @@ int main(void)
     close(fd); fd = open(temp, O_RDONLY); assert(fd >= 0);
     assert(!commit_image(fd, &old, 8192)); assert(matches(fd, &next, 8192));
     close(fd); unlink(temp);
-    puts("PASS: dual superblocks, exact 64 GiB target, alignment, stale geometry, capacity and invalid arguments; no device ioctl");
+    puts("PASS: dual superblocks (equal but for the kernel version string and its crc), exact 64 GiB target, alignment, stale geometry, capacity and invalid arguments; no device ioctl");
     return 0;
 }

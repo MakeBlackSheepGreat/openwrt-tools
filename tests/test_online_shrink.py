@@ -54,6 +54,21 @@ def sb(blocks=3932160):
     return bytes(raw)
 
 
+def checksummed(raw, checksum_offset=3068):
+    raw = bytearray(raw)
+    for offset in (1024, 5120):
+        struct.pack_into('<I', raw, offset+0x884, 0x800)
+        struct.pack_into('<I', raw, offset+32, checksum_offset)
+        # Independent bitwise implementation, also checked by the native test.
+        crc = 0xf2f52010
+        for value in raw[offset:offset+3068]:
+            crc ^= value
+            for _ in range(8):
+                crc = (crc >> 1) ^ (0xedb88320 if crc & 1 else 0)
+        struct.pack_into('<I', raw, offset+3068, crc)
+    return raw
+
+
 def device(block=4096):
     first,last,total=snapshot(block)
     data=partition(gpt.gpt_space(first,last,total),'userdata')
@@ -74,6 +89,46 @@ class OnlineTests(unittest.TestCase):
             raw=bytearray(sb());raw[offset]^=1
             with self.subTest(offset=offset),self.assertRaises(ValueError):superblocks(raw)
         with self.assertRaises(ValueError):superblocks(sb()[:-1])
+
+    def test_superblock_copies_may_differ_in_the_kernel_version_and_its_crc_only(self):
+        # struct f2fs_super_block: version[256] at 0x684, the crc over the block in its last 4 bytes. Every byte of
+        # either copy changed alone is refused, but for those.
+        for copy in (1024,5120):
+            for i in range(3072):
+                raw=bytearray(sb());raw[copy+i]^=0x5a;ignored=0x684<=i<0x784 or i>=3068
+                with self.subTest(copy=copy,offset=i):
+                    if ignored:self.assertEqual(superblocks(raw)['blocks'],3932160)
+                    else:
+                        with self.assertRaises(ValueError):superblocks(raw)
+        # what a U30 Air had: the primary names the running kernel, the backup an older build, and the crcs differ
+        raw=bytearray(sb())
+        raw[1024+0x684:1024+0x684+33]=b'5.4.254-android12-9-g35e7b2480b7a'
+        raw[5120+0x684:5120+0x684+33]=b'5.4.254-android12-9-g7463324543ed'
+        struct.pack_into('<I',raw,1024+3068,0x11111111);struct.pack_into('<I',raw,5120+3068,0x22222222)
+        self.assertEqual(superblocks(raw)['blocks'],3932160)
+
+    def test_each_checksummed_copy_must_be_valid_even_when_version_may_differ(self):
+        raw=bytearray(sb())
+        raw[1024+0x684:1024+0x684+33]=b'5.4.254-android12-9-g35e7b2480b7a'
+        raw[5120+0x684:5120+0x684+33]=b'5.4.254-android12-9-g7463324543ed'
+        raw=checksummed(raw)
+        self.assertNotEqual(raw[1024+3068:4096],raw[5120+3068:8192])
+        self.assertEqual(superblocks(raw)['blocks'],3932160)
+        # Bad CRCs and stale checksums on either copy must not become acceptable
+        # merely because the comparison ignores the kernel-version field.
+        for copy in (1024,5120):
+            for offset in (0x684,0x783,3068,3071):
+                bad=raw.copy();bad[copy+offset]^=1
+                with self.subTest(copy=copy,offset=offset),self.assertRaises(ValueError):
+                    superblocks(bad)
+        with self.assertRaises(ValueError):superblocks(checksummed(raw, checksum_offset=3064))
+        bad=raw.copy();bad[1024+0x784]^=1 # init_version is NOT the mutable version.
+        with self.assertRaises(ValueError):superblocks(checksummed(bad))
+        bad=raw.copy();bad[1024+24]^=1
+        with self.assertRaises(ValueError):superblocks(checksummed(bad))
+        # Even identical corruption in both copies must fail the checksum.
+        bad=raw.copy();bad[1024+0x684]^=1;bad[5120+0x684]^=1
+        with self.assertRaises(ValueError):superblocks(bad)
 
     def test_prefer_online_but_keep_explicit_format_and_existing_free_space(self):
         for kind in ('e5','mu300'):
