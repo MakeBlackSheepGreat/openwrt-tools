@@ -89,7 +89,9 @@ def resume_firmware(args):
                 raise ValueError('Firmware sources changed during resumed assembly')
             destination=parent/previous
             if destination.exists():raise ValueError('Published destination already exists')
-            before['private_version']=version
+            before.update(private_version=version,
+                          image_version=before['profile']+'-'+version,
+                          package_name=f"{before['profile']}-openwrt-{before['openwrt']}-{version}-k{before['kernel_release']}")
             api['write_json'](pending/'BUILD-RUN.json',{**task.data,'state':'verified','source':before,'assets':assets})
             pending.rename(destination)
             task.save(state='complete',output=str(destination),assets=assets)

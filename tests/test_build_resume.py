@@ -27,7 +27,8 @@ class Resume(unittest.TestCase):
         for name in self.args.profiles:
             kernel=root/name;kernel.mkdir();(kernel/'container-support.json').write_text(json.dumps(dict(model=name)))
             self.rows[name]={'kernel':kernel}
-        self.source=dict(source_commit='a'*40,source_fingerprint='same',source_dirty=False,private_version='new-version')
+        self.source=dict(source_commit='a'*40,source_fingerprint='same',source_dirty=False,private_version='new-version',
+                         profile='e5',openwrt='25.12.5',kernel_release='6.18.54')
         self.archive('e5');self.original=(self.pending/'e5-release.zip').read_bytes()
         self.original_time=(self.pending/'e5-release.zip').stat().st_mtime_ns
         self.builds=[];self.fail=False;owner=self
@@ -61,7 +62,10 @@ class Resume(unittest.TestCase):
         self.assertEqual(self.builds,['changxing60-package'])
         self.assertEqual((final/'e5-release.zip').read_bytes(),self.original)
         self.assertEqual((final/'e5-release.zip').stat().st_mtime_ns,self.original_time)
-        self.assertEqual(len(json.loads((final/'BUILD-RUN.json').read_text())['assets']),2)
+        receipt=json.loads((final/'BUILD-RUN.json').read_text())
+        self.assertEqual(len(receipt['assets']),2)
+        self.assertEqual(receipt['source']['image_version'],'e5-old-version')
+        self.assertEqual(receipt['source']['package_name'],'e5-openwrt-25.12.5-old-version-k6.18.54')
 
     def test_modified_firmware_stops_before_building_or_replacing_existing_archive(self):
         self.source['source_fingerprint']='changed'
