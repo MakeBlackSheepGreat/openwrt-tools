@@ -33,6 +33,14 @@ printf '%s\\n' "$end"
 '''
 
 
+def kernel_series(value):
+    """Manifest may carry either 7.2 or a complete native kernel release."""
+    match = re.fullmatch(r'([0-9]+\.[0-9]+)(?:\.[0-9]+(?:[-+][A-Za-z0-9_.+-]+)?)?',value)
+    if not match:
+        raise ValueError('Invalid package kernel version / 安装包内核版本无效')
+    return match[1]+'.'
+
+
 def legacy_layout(client, root, execute, read_exact):
     """Prove the mounted hidden-area layout using bounded, read-only evidence."""
     values = execute(client, LEGACY_LAYOUT_PROBE).strip().splitlines()
@@ -95,7 +103,11 @@ fi''').strip().splitlines()
         if (len(info) != 4 or info[1] not in ('a', 'b')
                 or not re.fullmatch(r'/dev/(?:mmcblk\d+p|sd[a-z]+)[1-9][0-9]*', info[2])):
             raise ValueError('Not a supported MU300 runtime')
-        if info[0] not in ('f50','v50','u30air'):
+        manifest = json.loads((root/'desktop/manifest.json').read_text(encoding='utf-8'))
+        native = manifest.get('platform') == 'u30pro'
+        if native != (info[0] == 'u30pro'):
+            raise ValueError('Package boot layout differs from runtime / 安装包启动布局与当前系统不一致')
+        if info[0] not in ('f50','v50','u30air','u30pro'):
             if gui: gui.confirm_update_profile(info[0])
             elif input('Unknown model '+info[0]+'; type yes to continue / 未匹配机型，输入 yes 继续: ') != 'yes':
                 raise ValueError('Model exception was not confirmed / 尚未确认机型风险')
@@ -111,9 +123,9 @@ fi''').strip().splitlines()
             gui.ctx.store.save(gui.ctx.record)
             gui.ctx.log(f'Verified legacy eMMC hidden-area root: offset={layout["offset"]}, '
                         f'capacity={layout["capacity"]}, loop_sectors={layout["sectors"]}; preserving layout', scope='update')
-        family = json.loads((root/'desktop/manifest.json').read_text(encoding='utf-8'))['kernel']
+        family = manifest['kernel']
         running = execute(client, 'uname -r').strip()
-        if not running.startswith(family+'.'):
+        if not running.startswith(kernel_series(family)):
             raise ValueError('Kernel family mismatch: running '+running+', package '+family)
         live = read_exact(client, f'dd if={info[2]} bs=1 skip=2048 count=32', 32)
         slot = 'b' if info[1] == 'a' else 'a'
@@ -145,6 +157,13 @@ fi''').strip().splitlines()
                 path = Path(temp)/name
                 path.write_bytes(data)
                 send(path, name)
+            if native:
+                from .native_boot import prepare_ssh
+                outputs, native_manifest = prepare_ssh(client, execute, read_exact,
+                    Path(temp)/'boot-desktop.img', info[1], Path(temp))
+                for name, path in outputs.items():
+                    send(path, 'native-'+name+'.img')
+                send(native_manifest, 'native-boot.tsv')
         if layout and legacy_layout(client, root, execute, read_exact) != layout:
             raise ValueError('Legacy root layout changed during upload; nothing committed / 上传期间旧版根区域发生变化，未执行更新写入')
         command = 'chmod 700 '+destination+'/busybox && sh '+destination+'/local-update.sh '+destination

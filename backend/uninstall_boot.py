@@ -78,7 +78,7 @@ def overlay(files):
     return bytes(result)
 
 
-def build(base, family, files):
+def build(base, family, files, *, android_slot=None):
     if (family not in ('e5','mu300') or len(base) != 64 << 20 or base[:8] != b'ANDROID!' or
             struct.unpack_from('<I', base, 40)[0] != 4 or base[-64:-60] != b'AVBf'):
         raise ValueError('A verified 64 MiB boot v4 image is required for uninstall')
@@ -99,14 +99,21 @@ def build(base, family, files):
         raise ValueError('Cannot find the packaged init script')
     # Use the existing model's drivers and setup. Never reach root mounting,
     # pending installation or pending update code in this one-shot image.
-    anchor = '\ntf_update_probe\n' if family == 'e5' else '\nROOT_OFFSET='
+    native = '# U30PRO-MU300 storage bootstrap' in init
+    anchor = ("\nlog 'stage=storage-ready'\n" if native else
+              '\ntf_update_probe\n' if family == 'e5' else '\nROOT_OFFSET=')
     if init.count(anchor) != 1:
         raise ValueError('Unsupported offline uninstall hook / 此安装包不支持离线卸载，请使用新版安装包')
-    begin = init.find('persist() {')
-    end = init.find('\n}\n', begin)
-    if begin < 0 or end < 0:
-        raise ValueError('Cannot disable boot log writes during uninstall')
-    init = init[:begin]+'persist() { :; }'+init[end+2:]
+    if native:
+        if android_slot not in ('a','b'):
+            raise ValueError('Native uninstall requires the verified Android slot')
+        files = dict(files, **{'etc/mu300-android-slot':(android_slot+'\n').encode()})
+    else:
+        begin = init.find('persist() {')
+        end = init.find('\n}\n', begin)
+        if begin < 0 or end < 0:
+            raise ValueError('Cannot disable boot log writes during uninstall')
+        init = init[:begin]+'persist() { :; }'+init[end+2:]
     hook = '\ntouch /run/stay\n'
     if family == 'mu300':
         hook += 'setup_usb_gadget\n'

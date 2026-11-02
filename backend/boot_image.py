@@ -4,6 +4,19 @@ import struct
 import zlib
 
 
+def inspect_native_package(root, android):
+    import json
+    import importlib.util
+    from pathlib import Path
+    root = Path(root)
+    manifest = root/'desktop/manifest.json'
+    if not manifest.is_file() or json.loads(manifest.read_text(encoding='utf-8')).get('platform') != 'u30pro':
+        return
+    spec = importlib.util.spec_from_file_location('native_trial_codec', root/'desktop/boot-runtime.py')
+    codec = importlib.util.module_from_spec(spec); spec.loader.exec_module(codec)
+    codec.native_inspect_route(android.read, android.shell, android.linux)
+
+
 def inspect_linux_boot(read, size, family, slot):
     if family not in ('e5','mu300') or slot not in ('a','b'):
         raise ValueError('Unsupported boot family or slot')
@@ -71,6 +84,7 @@ def boot_installed_mu300(api,android,root,*,repair=None):
     installed = None
     if repair is None:
         installed=inspect_linux_boot(android.read,int(android.shell('blockdev --getsize64 '+target).strip()),'mu300',android.linux)
+        inspect_native_package(root, android)
     current=android.read('dd if=/dev/block/by-name/boot_'+android.slot+' bs=512 count=8 2>/dev/null')
     if len(current)!=4096 or current[:8]!=b'ANDROID!':
         raise ValueError('Current Android boot header is incomplete / 当前 Android 启动镜像头不完整')
@@ -86,6 +100,7 @@ def boot_installed_mu300(api,android,root,*,repair=None):
     if repair is not None:
         repair()
         installed=inspect_linux_boot(android.read,int(android.shell('blockdev --getsize64 '+target).strip()),'mu300',android.linux)
+        inspect_native_package(root, android)
     if hashlib.sha256(current).hexdigest()==installed['header_sha256']:
         raise ValueError('Opposite slot has the same Android boot header; no distinct Linux boot identified / 另一槽与当前 Android 启动镜像头相同，未识别到独立 Linux 镜像')
     android.put(wanted,'misc-trial.bin')

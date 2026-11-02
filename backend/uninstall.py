@@ -250,7 +250,7 @@ def prepare(adapter, store, device, authorize_reset=None):
                 eligible(device,volume)
                 tools = growth_tools(adapter,volume['filesystem'])
                 action = 'grow-'+volume['filesystem']
-            build(base_boot(adapter),adapter.kind,tools)
+            build(base_boot(adapter),adapter.kind,tools,android_slot=device['slot'].removeprefix('_'))
         except (ConnectionError,TimeoutError,subprocess.TimeoutExpired):
             # A transport failure is not evidence that preserving data is
             # impossible. Do not turn a lost ADB connection into a wipe offer.
@@ -504,7 +504,7 @@ class Uninstaller:
             base = (self.adapter.root/'files/boot.img').read_bytes()
         else:
             base = self.adapter.legacy.payload_file(self.adapter.root,'boot-linux.img').read_bytes()
-        image = build(base,self.adapter.kind,files)
+        image = build(base,self.adapter.kind,files,android_slot=slot)
         path = self.folder/'boot-uninstall.img'; path.write_bytes(image)
         (self.folder/'trial.bin').write_bytes(trial)
         remote = '/data/local/tmp/openwrt-uninstall-'+self.r['id']
@@ -540,7 +540,15 @@ class Uninstaller:
         def commit_boot():
             # Cancellation is deferred by Context.effect. Do not terminate a
             # boot write because a host-side command deadline expired.
-            adb.shell(script,root=True,timeout=None)
+            if getattr(self.adapter,'package',{}).get('profile') == 'u30pro':
+                from .native_boot import write_android
+                record = write_android(self.adapter,device,path,trial,'uninstall/native',
+                    before_write=layout_checks+bcb_guard+
+                        '[ "$(sha256sum /dev/block/by-name/boot_'+slot+' | cut -d" " -f1)" = '+android_sha+' ]; ',
+                    before_misc=bcb_update,preserve_bcb=True)
+                self.r['uninstall_boot_sha256'] = record['planned']['boot']
+            else:
+                adb.shell(script,root=True,timeout=None)
             self.r['uninstall_armed'] = True
             self.ctx.store.save(self.r)
         self.ctx.effect('uninstall-arm',commit_boot)
@@ -672,6 +680,11 @@ class Uninstaller:
 
     def recover_arm(self):
         """Recover boot staging by exact readback; never replay a completed GPT edit."""
+        if getattr(self.adapter,'package',{}).get('profile') == 'u30pro':
+            from .native_boot import native_receipt
+            receipt = native_receipt(self.adapter,self.r['device'],'uninstall/native',self.folder/'boot-uninstall.img')
+            if receipt:
+                self.r['uninstall_boot_sha256'] = receipt['planned']['boot']
         if (not re.fullmatch('[a-f0-9]{64}',self.r.get('uninstall_boot_sha256','')) or
                 not (self.folder/'trial.bin').is_file() or not (self.ctx.directory/'backup/misc.bin').is_file()):
             raise RecoveryRequired('Uninstall staging was interrupted without sufficient readback evidence / 卸载准备中断且回读证据不足，请保留备份恢复')
@@ -715,6 +728,9 @@ class Uninstaller:
                 return None
             if bc != trial or target != self.r.get('uninstall_boot_sha256'):
                 raise RecoveryRequired('Interrupted boot/misc readback is not recognized / 中断的 boot/misc 回读不符合已保存记录，请保留备份恢复')
+            if getattr(self.adapter,'package',{}).get('profile') == 'u30pro':
+                from .native_boot import codec
+                codec().native_inspect_route(adb.read,lambda command:adb.shell(command,root=True),other)
         self.r['effects']['uninstall-arm'] = {'state':'done','time':time.time(),'result':'verified by recovery readback'}
         if 'uninstall-arm' not in self.r['completed']:
             self.r['completed'].append('uninstall-arm')
@@ -800,6 +816,9 @@ class Uninstaller:
             checksums[post_reset.name] = sha(post_reset)
             atomic_json(self.ctx.directory/'backup/checksums.json',checksums)
         normalized_bcb = uninstall_bcb(bcb) if bcb is not None else None
+        if getattr(self.adapter,'package',{}).get('profile') == 'u30pro':
+            from .native_boot import restore_android_companions
+            restore_android_companions(self.adapter,device)
         if source_hash == target_hash and bc == desired and bcb == normalized_bcb:
             entry = self.r['effects'].get('uninstall-final-boot')
             if entry:

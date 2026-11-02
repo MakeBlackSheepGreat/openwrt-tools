@@ -15,6 +15,15 @@ import test_uninstall as fx
 
 
 class ImageBounds(unittest.TestCase):
+    def test_split_init_boot_keeps_header_kernel_and_actual_slot(self):
+        original=bytearray(8 << 20);original[:8]=b'ANDROID!'
+        struct.pack_into('<II',original,8,0,4096);struct.pack_into('<I',original,40,4)
+        updated=bytearray(original);updated[4096]=1
+        growth.verify_image(original,updated,container='init_boot')
+        with self.assertRaises(ValueError):growth.verify_image(original,updated)
+        for offset in (8,16,40,44):
+            bad=bytearray(updated);bad[offset]^=1
+            with self.subTest(offset=offset),self.assertRaises(ValueError):growth.verify_image(original,bad,container='init_boot')
     def test_only_ramdisk_can_change(self):
         original = bytearray(64 << 20)
         original[:8] = b'ANDROID!'
@@ -50,6 +59,15 @@ class PreMount(unittest.TestCase):
 
     def rendered(self):
         return growth.scripts(self.record, self.adapter, self.volume, 'c'*64)
+
+    def test_split_android_growth_scripts_restore_init_boot_only_on_actual_slot(self):
+        for slot in ('a','b'):
+            self.record['device']['slot']='_'+slot
+            files=growth.scripts(self.record,self.adapter,self.volume,'c'*64,container='init_boot')
+            finish=next(v.decode() for k,v in files.items() if k.endswith('-finish.sh'))
+            self.assertIn('of=/dev/block/by-name/init_boot_'+slot,finish)
+            self.assertNotIn('/by-name/boot_',finish)
+            self.assertNotIn('/by-name/vendor_boot_',finish)
 
     def test_restore_requires_original_backup_and_exact_maintenance_image(self):
         directory=Path(self.fx.temp.name)/'restore-fixture'

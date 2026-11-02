@@ -554,7 +554,7 @@ class Service:
             result = dict(serial='ssh:'+key, cid=cid, ssh_key=key, host=host, profile=profile,
                         model=profile.upper(), system='OpenWrt', slot=read('cat /run/mu300/linux-slot') if kind == 'mu300' else 'B',
                         root=True, readiness='ready', capacity=capacity)
-            warning = (mu300_runtime(profile) if kind=='mu300' else runtime_warning(self.package['profile'],profile))
+            warning = (mu300_runtime(profile,self.package['profile']) if kind=='mu300' else runtime_warning(self.package['profile'],profile))
             if warning: result['model_mismatch'] = warning
             return result
         finally:

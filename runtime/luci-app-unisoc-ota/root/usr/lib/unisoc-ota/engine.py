@@ -427,10 +427,11 @@ class Engine:
             if op['after'] and op['after']['kind'] == 'file': incoming += op['after']['size']
         boot_work = bool(m.get('boot')) or self.root == Path('/') or os.environ.get('UNISOC_OTA_LIVE') == '1'
         if boot_work:
-            from boot import target, check_file
+            from boot import target, check_file, native_scratch_bytes
             check_file(target(self.root, m['family']), m['family'])
             backup += 64 << 20
             incoming += (128 if m.get('boot') else 64) << 20
+            incoming += native_scratch_bytes(self.root, m['family'], bool(m.get('boot')))
         required = backup + incoming + (32 << 20)
         required += sum(d.get('size', 0) for d in m.get('runtime', {}).values())
         free = shutil.disk_usage(self.root).free
@@ -588,11 +589,12 @@ class Engine:
             else:
                 self.install_descriptor(op['path'], old)
         if data.get('boot'):
-            from boot import write_file
+            from boot import write_file, native_restore
             original = self.state/data['backup']/'boot.img'
             with original.open('rb') as stream:
                 if digest(stream) != data['boot_sha256']:
                     raise ValueError('Boot recovery backup checksum mismatch')
+            native_restore(self.root, self.state/data['backup'], data.get('boot_companions', []))
             write_file(self.path(data['boot']), original, data['boot_family'])
         previous = data.get('previous_identity')
         if previous:
@@ -640,7 +642,8 @@ class Engine:
                 except (OSError, ValueError) as error:
                     raise ValueError('Rollback backup corrupt; do not reboot: '+op['path']) from error
         if data.get('boot'):
-            from boot import signature
+            from boot import signature, native_rollback_conflicts
+            conflicts.extend(native_rollback_conflicts(self.root, backup, data.get('boot_companions', [])))
             if data.get('boot_after_signature') and signature(self.path(data['boot']), data['boot_family']) != data['boot_after_signature']:
                 conflicts.append(dict(path=data['boot'], fields=['boot']))
             with (backup/'boot.img').open('rb') as stream:
@@ -698,6 +701,8 @@ class Engine:
         with original.open('rb') as stream: data['boot_sha256'] = digest(stream)
         data['boot_family'] = family
         data['boot_after_signature'] = signature(final, family)
+        from boot import native_prepare
+        data['boot_companions'] = native_prepare(self.root, family, backup, guard, final)
         return guard, final
 
     def apply(self, patch, progress=lambda *_: None):
@@ -760,7 +765,8 @@ class Engine:
                 atomic_json(journal, data)
             try:
                 if boot_paths and boot_paths[0]:
-                    from boot import write_file
+                    from boot import write_file, native_commit
+                    native_commit(self.root, backup, data.get('boot_companions', []), 'guard')
                     write_file(self.root/data['boot'], boot_paths[0], data['boot_family'])
                 for i, op in enumerate(ops):
                     # Recheck at commit time; a concurrent user edit is a conflict.
@@ -776,7 +782,8 @@ class Engine:
                         raise ValueError('Written file verification failed: ' + op['path'])
                     progress(i + 1, len(ops), op['path'])
                 if boot_paths and boot_paths[1] != boot_paths[0]:
-                    from boot import write_file
+                    from boot import write_file, native_commit
+                    native_commit(self.root, backup, data.get('boot_companions', []), 'final')
                     write_file(self.root/data['boot'], boot_paths[1], data['boot_family'])
                 identity = dict(family=patch.manifest['family'], profile=patch.manifest['profile'],
                                 version=patch.manifest['target_version'], kernel_release=kernel_release)

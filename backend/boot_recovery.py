@@ -92,7 +92,8 @@ def internal_proof(adapter, device, kernel_release, *, mode='part'):
     if kernel_release not in directories:
         raise RecoveryRequired('Use a package matching the installed kernel modules / 请使用与现有系统内核模块版本匹配的完整包修复启动；本次未写入系统: '+kernel_release)
     available = fs.directory(module_dir)
-    candidates = ['sipc-core.ko', 'sprd-cpufreq-v2-driver.ko', 'sipc_wwan.ko']
+    candidates = ['sipc-core.ko', 'sprd-cpufreq-v2-driver.ko', 'sipc_wwan.ko',
+                  'sprd-cpufreq-v2.ko', 'u30pro-sprd-scufreq.ko']
     selected = next((name for name in candidates if name in available), None)
     if selected is None:
         for folder in ('extra', 'modem', 'modules'):
@@ -140,6 +141,15 @@ def prepare(adapter, device, *, force=False):
     except ValueError as error:
         reason = str(error)
         files = {}
+    native_before = None
+    if adapter.kind == 'mu300' and getattr(adapter, 'package', {}).get('profile') == 'u30pro':
+        from .native_boot import codec
+        native_before = {name:digest_device(adapter.adb, '/dev/block/by-name/'+name+'_'+other)
+                         for name in ('vendor_boot','init_boot','dtbo')}
+        try:
+            codec().native_inspect_route(read_boot, lambda command:adapter.adb.shell(command,root=True), other)
+        except ValueError as error:
+            reason = str(error)
     init = files.get('init', b'')
     if b'part_prepare' in init and 'etc/mu300-desktop-prepare' in files:
         raise RecoveryRequired('Partition preparation is pending; resume the installation / 分区准备尚未完成，请继续原安装流程')
@@ -162,6 +172,8 @@ def prepare(adapter, device, *, force=False):
         reason = 'Rebuild requested for a failed boot / 已选择重建启动镜像以处理启动失败'
     info = {'version':1, 'required':bool(reason), 'target':target, 'slot':other,
             'android_slot':slot, 'before_sha256':before}
+    if native_before is not None:
+        info.update(native_before=native_before, targets=['boot_'+other,'vendor_boot_'+other,'init_boot_'+other,'dtbo_'+other])
     image = None
     if reason:
         base = base_boot(adapter)
@@ -184,6 +196,10 @@ def prepare(adapter, device, *, force=False):
         info.update(reason=reason, layout=mode, root=proof, sha256=hashlib.sha256(image).hexdigest())
     if digest_device(adapter.adb, target) != before:
         raise RecoveryRequired('Boot changed during inspection; check again / 检查期间启动分区发生变化，请重新检查')
+    if native_before is not None:
+        for name, expected in native_before.items():
+            if digest_device(adapter.adb, '/dev/block/by-name/'+name+'_'+other) != expected:
+                raise RecoveryRequired('Native boot changed during inspection / 检查期间原生启动分区发生变化')
     return info, image
 
 
@@ -202,6 +218,9 @@ def repair(adapter, device, info):
         raise RecoveryRequired('Prepared boot image is missing or changed; inspect a new plan / 修复镜像缺失或变化，请重新检查启动计划')
     if internal_proof(adapter, device, info['root']['kernel_release'],mode=info['layout']) != info['root']:
         raise RecoveryRequired('Installed root changed after confirmation / 确认后系统分区身份或模块版本发生变化，请重新检查')
+    if info.get('native_before') is not None:
+        from .native_boot import repair_android
+        return repair_android(adapter, device, info, image)
     destination = ctx.directory/'boot-repair-backup'
     destination.mkdir(exist_ok=True)
     before = destination/('boot_'+info['slot']+'.img')
