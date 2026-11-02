@@ -47,15 +47,14 @@ def resume_firmware(args):
             before=identify(repo,'e5','6.18.54')
             if before['source_dirty']:raise ValueError('Firmware checkout must be clean before resuming')
             assets=[]; version=None; found=set()
-            completed={s['stage'] for s in state['steps'] if s['state']=='complete'}
             for path in sorted(pending.glob('*.zip')):
                 if path.is_symlink():raise ValueError('Symlink archive is not an owned output')
                 with zipfile.ZipFile(path) as archive:
                     record=json.loads(archive.read('files/RELEASE.json'))
                     build=json.loads(archive.read('files/BUILD.json'))
                 profile=record['profile']
-                if profile not in rows or profile in found or profile+'-package' not in completed:
-                    raise ValueError('Archive is not a completed selected model: '+profile)
+                if profile not in rows or profile in found:
+                    raise ValueError('Archive is not a unique selected model: '+profile)
                 if (record['source_commit']!=before['source_commit'] or record['source_fingerprint']!=before['source_fingerprint'] or
                         record.get('source_dirty') is not False or path.name!=record['package_name']+'.zip'):
                     raise ValueError('Firmware source changed since this archive was built: '+profile)

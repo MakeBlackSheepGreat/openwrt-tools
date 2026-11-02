@@ -68,6 +68,11 @@ class Resume(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'source changed'):tool.resume_firmware(self.args)
         self.assertFalse(self.builds);self.assertEqual((self.pending/'e5-release.zip').read_bytes(),self.original)
 
+    def test_verified_archive_survives_a_lost_completion_checkpoint(self):
+        self.archive('changxing60')
+        tool.resume_firmware(self.args)
+        self.assertEqual(self.builds,[])
+
     def test_checksum_damage_stops_before_missing_models_build(self):
         path=self.pending/'e5-release.zip';path.write_bytes(self.original+b'extra')
         with self.assertRaisesRegex(ValueError,'checksum'):tool.resume_firmware(self.args)
