@@ -144,10 +144,22 @@ class NativeInstaller(unittest.TestCase):
             self.assertNotIn(b'DO_NOT_MOUNT_ROOT',members['init'])
             self.assertIn(b'openwrt-uninstall/worker.sh',members['init'])
             self.assertEqual(members['etc/mu300-android-slot'],(slot+'\n').encode())
+            self.assertEqual(members['etc/mu300-desktop-root-mode'],b'prepare\n')
             templates={'boot':image(),'vendor_boot':vendor(),'init_boot':image(b'',b'ANDROID')}
             result=boot.native_images(updated,templates)
             self.assertIn(b'openwrt.uninstall=1',result['boot'][44:1580])
             self.assertEqual(boot.native_boot_parts(result['boot'])[1],boot.native_vendor_parts(result['vendor_boot'])[0])
+
+    def test_uninstall_overrides_a_bound_root_mode_for_post_removal_retries(self):
+        from backend.uninstall_boot import build,archives,entries
+        init=b"#!/bin/sh\n# U30PRO-MU300 storage bootstrap\nlog 'stage=storage-ready'\nDO_NOT_MOUNT_ROOT\n"
+        for previous in (b'part\n',b'sd\n'):
+            ram=boot.overlay({'init':(init,stat.S_IFREG|0o755),
+                'etc/mu300-desktop-root-mode':(previous,stat.S_IFREG|0o644)})
+            updated=build(image(b'KERNEL',ram,64 << 20),'mu300',{},android_slot='b')
+            members={name:data for archive in archives(boot.native_boot_parts(updated)[1]) for name,data,mode in entries(archive)}
+            self.assertEqual(members['etc/mu300-desktop-root-mode'],b'prepare\n')
+            self.assertNotIn(b'DO_NOT_MOUNT_ROOT',members['init'])
 
 
 @unittest.skipUnless(os.name=='posix','POSIX durable transaction engine')

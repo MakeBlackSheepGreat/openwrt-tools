@@ -10,7 +10,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import test_uninstall as fx
 import test_uninstall_evidence as evidence
 from backend.service import Service
-from backend.state import Cancelled, DeviceLock
+from backend.state import Cancelled, DeviceLock, RecoveryRequired
 from backend.uninstall import prepare, pending_removal, Uninstaller
 
 
@@ -96,6 +96,99 @@ class DeviceEntry(unittest.TestCase):
             with self.assertRaises(Cancelled):worker.run()
         self.assertEqual(worker.service.stop.wait.call_count,1)
         arm.assert_called_once_with(ready)
+
+
+class NativeRetry(unittest.TestCase):
+    def setUp(self):
+        self.f=fx.Journal();self.f.setUp();self.addCleanup(self.f.tearDown)
+
+    def worker(self, slot='b'):
+        self.f.configure('mu300',slot,gap=True)
+        ctx=self.f.plan();r=ctx.record
+        r['package']['profile']='u30pro'
+        self.f.adapter.package=r['package']
+        r.update(uninstall_recheck=True,uninstall_android_sha256='a'*64)
+        r['effects']['uninstall-arm']={'state':'done'}
+        device={**self.f.device,'boot_id':'returned-android'}
+        worker=Uninstaller(None,ctx,self.f.adapter)
+        previous={'committed':True,'planned':{name:str(i)*64 for i,name in enumerate(
+            ('boot','vendor_boot','init_boot','dtbo'),1)}}
+        other='b' if slot=='a' else 'a'
+        hashes={'boot_'+slot:'a'*64,**{name+'_'+other:value for name,value in previous['planned'].items()}}
+        def shell(command,**kwargs):
+            name=command.split('/dev/block/by-name/',1)[1]
+            return hashes[name]+'  '+name
+        self.f.adb.shell=Mock(side_effect=shell)
+        return worker,ctx,device,previous,hashes
+
+    def test_explicit_retry_checks_every_container_and_preserves_original_backups(self):
+        for slot in ('a','b'):
+            with self.subTest(slot=slot):
+                worker,ctx,device,previous,_=self.worker(slot)
+                original={p.name:p.read_bytes() for p in (ctx.directory/'uninstall').iterdir() if p.is_file()}
+                with patch.object(worker,'layout_state',return_value='before'), \
+                        patch('backend.native_boot.native_receipt',return_value=previous), \
+                        patch.object(worker,'arm') as arm:
+                    self.assertTrue(worker.retry_native_removal(device))
+                arm.assert_called_once_with(device)
+                self.assertFalse(worker.resume_growth)
+                self.assertNotIn('uninstall_recheck',ctx.record)
+                self.assertEqual(ctx.record['uninstall_wait_boot_id'],device['boot_id'])
+                self.assertEqual(ctx.record['uninstall_retry_linux_sha256'],previous['planned']['boot'])
+                self.assertEqual(original,{p.name:p.read_bytes() for p in (ctx.directory/'uninstall').iterdir() if p.is_file()})
+                self.assertFalse(any('of=' in call.args[0] for call in self.f.adb.shell.call_args_list))
+
+    def test_changed_android_or_companion_refuses_retry_before_staging(self):
+        for changed in ('boot_b','boot_a','vendor_boot_a','init_boot_a','dtbo_a'):
+            with self.subTest(changed=changed):
+                worker,ctx,device,previous,hashes=self.worker();hashes[changed]='f'*64
+                with patch.object(worker,'layout_state',return_value='before'), \
+                        patch('backend.native_boot.native_receipt',return_value=previous), \
+                        patch.object(worker,'arm') as arm, self.assertRaises(RecoveryRequired):
+                    worker.retry_native_removal(device)
+                arm.assert_not_called()
+                self.assertEqual(ctx.record['effects']['uninstall-arm']['state'],'done')
+
+    def test_missing_or_uncommitted_native_receipt_refuses_retry(self):
+        for receipt in (None,{'committed':False}):
+            worker,ctx,device,_,_=self.worker()
+            with patch.object(worker,'layout_state',return_value='before'), \
+                    patch('backend.native_boot.native_receipt',return_value=receipt), \
+                    patch.object(worker,'arm') as arm, self.assertRaises(RecoveryRequired):
+                worker.retry_native_removal(device)
+            arm.assert_not_called()
+
+    def test_other_families_reset_and_completed_layout_never_use_this_retry(self):
+        for condition in ('other-family','reset','after'):
+            worker,ctx,device,_,_=self.worker()
+            if condition=='other-family':self.f.adapter.package={'profile':'mu300-family'}
+            if condition=='reset':ctx.record['plan']['wipe']=True
+            with patch.object(worker,'layout_state',return_value='after' if condition=='after' else 'before'), \
+                    patch('backend.native_boot.native_receipt') as receipt, patch.object(worker,'arm') as arm:
+                self.assertFalse(worker.retry_native_removal(device))
+            receipt.assert_not_called();arm.assert_not_called()
+
+    def test_a_second_failed_boot_reports_failure_instead_of_rearming_forever(self):
+        worker,ctx,device,previous,_=self.worker()
+        worker.service=SimpleNamespace(stop=SimpleNamespace(wait=Mock(return_value=False)))
+        def armed(_):ctx.record['effects']['uninstall-arm']={'state':'done'}
+        with patch.object(worker,'ready',side_effect=[device,{**device,'boot_id':'second-failed-boot'}]), \
+                patch.object(worker,'layout_state',return_value='before'), \
+                patch('backend.native_boot.native_receipt',return_value=previous), \
+                patch.object(worker,'arm',side_effect=armed) as arm, self.assertRaisesRegex(RecoveryRequired,'Android returned'):
+            worker.run()
+        arm.assert_called_once_with(device)
+
+    def test_retry_write_failure_is_not_swallowed_as_an_expected_disconnect(self):
+        worker,ctx,device,previous,_=self.worker()
+        worker.service=SimpleNamespace(stop=SimpleNamespace(wait=Mock(return_value=False)))
+        with patch.object(worker,'ready',return_value=device), \
+                patch.object(worker,'layout_state',return_value='before'), \
+                patch('backend.native_boot.native_receipt',return_value=previous), \
+                patch.object(worker,'arm',side_effect=ConnectionError('write interrupted')), \
+                self.assertRaisesRegex(ConnectionError,'write interrupted'):
+            worker.run()
+        worker.service.stop.wait.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

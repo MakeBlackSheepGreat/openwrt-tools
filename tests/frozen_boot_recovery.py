@@ -63,6 +63,16 @@ def child(root):
             else:
                 assert files['etc/e5/linux-slot'].strip()==other.encode()
                 assert b'/etc/e5/part-root' in files['init']
+            if package.get('profile')=='u30pro':
+                from backend.uninstall_boot import build,archives,entries
+                maintenance=build(base,adapter.kind,{},android_slot=slot)
+                size=struct.unpack_from('<I',maintenance,12)[0]
+                at=4096+((kernel+4095)&~4095)
+                members={n:v for arc in archives(maintenance[at:at+size]) for n,v,m in entries(arc)}
+                assert members['etc/mu300-desktop-root-mode']==b'prepare\n'
+                assert members['etc/mu300-android-slot']==(slot+'\n').encode()
+                assert b'exec /bin/busybox sh /openwrt-uninstall/worker.sh' in members['init']
+                assert b'desktop_storage_start ||' not in members['init']
             results.append({'android_slot':slot,'linux_slot':other,'kernel_unchanged':True,
                             'boot_sha256':hashlib.sha256(image).hexdigest()})
     finally:

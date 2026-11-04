@@ -107,7 +107,11 @@ def build(base, family, files, *, android_slot=None):
     if native:
         if android_slot not in ('a','b'):
             raise ValueError('Native uninstall requires the verified Android slot')
-        files = dict(files, **{'etc/mu300-android-slot':(android_slot+'\n').encode()})
+        # The canonical payload has no device-bound root mode. Maintenance
+        # waits for userdata and misc, including a retry after mu300root has
+        # already been removed; it must never wait for or mount that root.
+        files = dict(files, **{'etc/mu300-android-slot':(android_slot+'\n').encode(),
+                              'etc/mu300-desktop-root-mode':b'prepare\n'})
     else:
         begin = init.find('persist() {')
         end = init.find('\n}\n', begin)

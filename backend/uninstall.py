@@ -602,6 +602,7 @@ class Uninstaller:
             self.arm(device)
         else:
             self.r['uninstall_armed'] = True
+        retry_before = False
         while True:
             self.ctx.boundary()
             try:
@@ -612,6 +613,10 @@ class Uninstaller:
                 elif device.get('boot_id') == self.r.get('uninstall_wait_boot_id',self.r['device'].get('boot_id')):
                     self.ctx.stage('uninstall_offline','waiting_user',reboot_manually=True)
                 elif self.layout_state() == 'before':
+                    if (self.resume_growth and not self.r['plan']['wipe'] and
+                            getattr(self.adapter,'package',{}).get('profile') == 'u30pro'):
+                        retry_before = True
+                        break
                     raise RecoveryRequired('Android returned before offline removal completed. Keep backups and export diagnostics. / Android 已返回但离线卸载未完成，请保留备份并导出诊断。')
                 else:
                     break
@@ -621,6 +626,10 @@ class Uninstaller:
                 raise Cancelled()
         # No reboot is expected during final checks/boot cleanup. A command or
         # write failure here must be reported, rather than hidden in a wait loop.
+        if retry_before:
+            if self.retry_native_removal(device):
+                return self.run()
+            raise RecoveryRequired('Uninstall layout changed before retry / 重试前卸载布局已变化，请重新核对')
         if self.r.get('uninstall_android_growth_attempted'):
             if android_growth_boot.restore(self,device):
                 self.r['uninstall_wait_boot_id']=device['boot_id'];self.ctx.store.save(self.r)
@@ -646,6 +655,40 @@ class Uninstaller:
                 android_growth_boot.stage(self,device,volume)
                 return self.run()
         return self.finish(device)
+
+    def retry_native_removal(self, device):
+        """An explicit retry may replace a proven, unexecuted native worker.
+
+        No retry loop: consume the recheck before staging another one-shot.
+        All boot containers and both GPT copies must still match the saved
+        operation. The ordinary arm path rechecks installation and userdata
+        evidence, retains the original backups, and commits misc last.
+        """
+        if (getattr(self.adapter,'package',{}).get('profile') != 'u30pro' or
+                self.r['plan']['wipe'] or self.layout_state() != 'before'):
+            return False
+        from .native_boot import native_receipt
+        previous = native_receipt(self.adapter,device,'uninstall/native',self.folder/'boot-uninstall.img')
+        if not previous or not previous.get('committed'):
+            raise RecoveryRequired('Native uninstall write is not verified / 原生卸载启动写入未校验，不能重新准备')
+        slot = device['slot'].removeprefix('_'); other = 'b' if slot == 'a' else 'a'
+        adb = self.adapter.adb
+        actual = adb.shell('sha256sum /dev/block/by-name/boot_'+slot,root=True).split()
+        if not actual or actual[0] != self.r.get('uninstall_android_sha256'):
+            raise RecoveryRequired('Android boot changed after uninstall preparation / 卸载准备后 Android 启动镜像已变化')
+        for name in ('boot','vendor_boot','init_boot','dtbo'):
+            actual = adb.shell('sha256sum /dev/block/by-name/'+name+'_'+other,root=True).split()
+            if not actual or actual[0] != previous['planned'].get(name):
+                raise RecoveryRequired('Pending native uninstall container changed / 待执行原生卸载启动分区已变化: '+name)
+        self.resume_growth = False
+        self.r.pop('uninstall_recheck',None)
+        self.r['uninstall_retry_linux_sha256'] = previous['planned']['boot']
+        self.r['uninstall_wait_boot_id'] = device['boot_id']
+        self.r['effects'].pop('uninstall-arm')
+        self.ctx.store.save(self.r)
+        self.ctx.log('Confirmed unchanged GPT, Android and native boot containers; rebuilding the offline uninstall request for this explicit retry / 已核实分区表、Android 和原生启动分区未变化，正在为本次重试重新准备离线卸载',scope='uninstall')
+        self.arm(device)
+        return True
 
     def rearm_growth(self, device):
         """Explicit retry re-arms only the same pending worker through misc."""
