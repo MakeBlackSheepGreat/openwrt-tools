@@ -74,6 +74,18 @@ def child(root):
                 assert members['etc/mu300-android-slot']==(slot+'\n').encode()
                 assert b'exec /bin/busybox sh /openwrt-uninstall/worker.sh' in members['init']
                 assert b'desktop_storage_start ||' not in members['init']
+                # Fresh removal may inspect the inactive maintenance boot;
+                # ordinary boot/install operations must still reject it.
+                from backend.boot_image import inspect_linux_boot
+                def read_maintenance(command):
+                    match=re.fullmatch(r'dd if=\S+ bs=(\d+)(?: skip=(\d+))? count=(\d+) 2>/dev/null',command)
+                    assert match,command
+                    unit,skip,count=int(match[1]),int(match[2] or 0),int(match[3])
+                    return maintenance[unit*skip:unit*(skip+count)]
+                try:inspect_linux_boot(read_maintenance,len(maintenance),adapter.kind,other)
+                except ValueError:pass
+                else:raise AssertionError('ordinary operations accepted pending removal')
+                assert inspect_linux_boot(read_maintenance,len(maintenance),adapter.kind,other,allow_uninstall=True)['maintenance']
             results.append({'android_slot':slot,'linux_slot':other,'kernel_unchanged':True,
                             'boot_sha256':hashlib.sha256(image).hexdigest()})
     finally:

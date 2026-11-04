@@ -17,7 +17,7 @@ def inspect_native_package(root, android):
     codec.native_inspect_route(android.read, android.shell, android.linux)
 
 
-def inspect_linux_boot(read, size, family, slot):
+def inspect_linux_boot(read, size, family, slot, *, allow_uninstall=False):
     if family not in ('e5','mu300') or slot not in ('a','b'):
         raise ValueError('Unsupported boot family or slot')
     limit=(56 if family=='e5' else 48)<<20
@@ -42,7 +42,8 @@ def inspect_linux_boot(read, size, family, slot):
         raise ValueError('No recognized '+family+' Linux boot in slot '+slot+' / 目标槽未识别到相应机型系列的 Linux 启动镜像')
     if any(item.startswith('e5.part_prepare=') for item in command):
         raise ValueError('Partition preparation is pending; resume the saved installation / 分区准备尚未完成，请从保存记录续装')
-    if 'openwrt.uninstall=1' in command:
+    maintenance = 'openwrt.uninstall=1' in command
+    if maintenance and not allow_uninstall:
         raise ValueError('Uninstall is pending; resume its saved record instead of booting OpenWrt / 卸载尚未完成，请从保存记录继续，不要临时启动 OpenWrt')
     end=4096+((kernel+4095)//4096)*4096+((ramdisk+4095)//4096)*4096
     footer=tail[-64:]
@@ -51,7 +52,9 @@ def inspect_linux_boot(read, size, family, slot):
     original,offset,length=struct.unpack_from('>QQQ',footer,12)
     if original!=end or offset!=end or not length or offset+length>limit or offset+length>size-64:
         raise ValueError('Installed boot payload bounds are invalid / 已安装启动镜像范围无效')
-    return {'header_version':version,'kernel_bytes':kernel,'ramdisk_bytes':ramdisk,'header_sha256':hashlib.sha256(header).hexdigest()}
+    result = {'header_version':version,'kernel_bytes':kernel,'ramdisk_bytes':ramdisk,'header_sha256':hashlib.sha256(header).hexdigest()}
+    if maintenance:result['maintenance'] = True
+    return result
 
 
 def inspect_e5_boot(read,size):

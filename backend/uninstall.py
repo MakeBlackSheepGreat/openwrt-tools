@@ -363,6 +363,10 @@ class Uninstaller:
                 'openwrt/etc/mu300/desktop-mode','.mu300/boot-os','openwrt/etc/openwrt_release'}
             if family == 'mu300' and 'upstream_os' in proof:
                 paths = mu300_region.marker_paths(proof)
+            if proof.get('maintenance'):
+                if family != 'mu300' or self.r['package'].get('profile') != 'u30pro' or version != 3 or 'upstream_os' in proof:
+                    raise RecoveryRequired('Maintenance removal profile differs / 维护卸载的机型或布局不符')
+                paths.add('openwrt/etc/mu300/platform')
             if version == 4 and (not re.fullmatch('[a-f0-9]{64}',proof.get('region_header_sha256','')) or
                     'upstream_os' not in proof or storage.get('ROOT_START') != root['start'] or storage.get('ROOT_SIZE') != self.meta['root_size']):
                 raise RecoveryRequired('Upstream region evidence differs / 上游区域身份与记录不符')
@@ -471,7 +475,9 @@ class Uninstaller:
         slot = device['slot'].removeprefix('_'); other = 'b' if slot == 'a' else 'a'
         with debug_output(self.ctx):
             if not self.r.get('uninstall_retry_linux_sha256'):
-                inspect_linux_boot(adb.read, int(adb.shell('blockdev --getsize64 /dev/block/by-name/boot_'+other,root=True)), self.adapter.kind, other)
+                inspect_linux_boot(adb.read, int(adb.shell('blockdev --getsize64 /dev/block/by-name/boot_'+other,root=True)), self.adapter.kind, other,
+                    allow_uninstall=(getattr(self.adapter,'package',{}).get('profile') == 'u30pro' and
+                                     bool(self.meta.get('installation_evidence',{}).get('maintenance'))))
             self.adapter.backup(device)
         self.ctx.stage('uninstall_prepare')
         if self.layout_state() != 'before':

@@ -340,7 +340,9 @@ class Service:
                 pending = any(item['device'].get('cid') == device.get('cid') and item['status'] != 'completed' and
                               (choices.get('method') != 'uninstall' and item['choices'].get('method') == 'uninstall' and item['effects'].get('uninstall-arm') or
                                item['choices'].get('method') == 'expand' and item['effects'].get('expand-gpt')) for item in self.store.list())
-                if pending or b'openwrt.uninstall=1' in header[44:1580].split(b'\0',1)[0].split():
+                fresh_native_removal = (choices.get('method') == 'uninstall' and
+                                        self.package.get('profile') == 'u30pro' and device.get('existing'))
+                if pending or (b'openwrt.uninstall=1' in header[44:1580].split(b'\0',1)[0].split() and not fresh_native_removal):
                     raise RecoveryRequired('Storage maintenance is already pending. Resume/import its saved record; do not create another operation. / 已有未完成的存储维护，请继续或导入原记录，不要创建新操作。')
             if choices.get('method') == 'uninstall':
                 def authorize_reset(fingerprint):

@@ -209,14 +209,16 @@ def inspect_installation(adapter, device, root, *, boot_backup=None, recovery_st
                     raise ValueError('Unsupported backup metadata read')
                 bs, skip, count = int(match[1]),int(match[2] or 0),int(match[3])
                 return boot_backup[bs*skip:bs*(skip+count)]
-        boot = inspect_linux_boot(read_boot,boot_size,adapter.kind,other)
+        native = adapter.kind == 'mu300' and getattr(adapter,'package',{}).get('profile') == 'u30pro' and not region
+        boot = inspect_linux_boot(read_boot,boot_size,adapter.kind,other,allow_uninstall=native)
+        maintenance = boot.get('maintenance',False)
         start = 4096+((boot['kernel_bytes']+4095)&~4095)
         size = boot['ramdisk_bytes']; count = (size+4095)//4096
         ram = read_boot(f'dd if=/dev/block/by-name/boot_{other} bs=4096 skip={start//4096} count={count} 2>/dev/null')
         if len(ram) != count*4096:
             raise ValueError('Incomplete installed ramdisk')
         files = {}
-        wanted = {'init','etc/mu300-desktop-root-mode','etc/mu300-desktop-identity','etc/mu300-desktop-prepare'}
+        wanted = {'init','etc/mu300-android-slot','etc/mu300-desktop-root-mode','etc/mu300-desktop-identity','etc/mu300-desktop-prepare'}
         for archive in archives(ram[:size]):
             for name, content, mode in entries(archive):
                 if name in wanted:
@@ -224,7 +226,17 @@ def inspect_installation(adapter, device, root, *, boot_backup=None, recovery_st
                         raise ValueError('Unsupported installed boot evidence')
                     files[name] = content
         upstream = False
-        if adapter.kind == 'e5':
+        if maintenance:
+            # A new removal backs up today's state. The old maintenance image
+            # identifies only the inactive boot; ownership comes from the live
+            # GPT, idle ext4 and completed-system markers below, not old records.
+            if (b'# U30PRO-MU300 storage bootstrap' not in files.get('init',b'') or
+                    b'exec /bin/busybox sh /openwrt-uninstall/worker.sh' not in files.get('init',b'') or
+                    files.get('etc/mu300-android-slot',b'').strip() != slot.encode()):
+                raise ValueError('Unrecognized native maintenance boot / 无法识别本机维护启动镜像')
+            paths = {'openwrt/etc/mu300/desktop-mode':b'part', '.mu300/boot-os':None,
+                     'openwrt/etc/openwrt_release':None, 'openwrt/etc/mu300/platform':b'u30pro'}
+        elif adapter.kind == 'e5':
             if b'/etc/e5/part-root' not in files.get('init',b''):
                 raise ValueError('Installed E5 boot does not recognize internal partitions / 已安装的 E5 启动镜像不支持内置分区')
             paths = {'etc/e5/part-root':None,'etc/openwrt_release':None}
@@ -311,6 +323,7 @@ def inspect_installation(adapter, device, root, *, boot_backup=None, recovery_st
         proof = {'version':1,'boot_header_sha256':boot['header_sha256'],
                 'ramdisk_sha256':hashlib.sha256(ram[:size]).hexdigest(),
                 'superblock_sha256':hashlib.sha256(fs.super).hexdigest(),'markers':paths}
+        if maintenance:proof['maintenance'] = True
         if upstream:
             proof.update(upstream_os=os)
         if region:

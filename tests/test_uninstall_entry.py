@@ -58,6 +58,32 @@ class DeviceEntry(unittest.TestCase):
         self.assertEqual(result['id'],ctx.record['id'])
         self.assertTrue(result['plan']['continuing_removal'])
 
+    def test_deleted_history_with_native_maintenance_can_make_a_new_plan(self):
+        for slot in ('a','b'):
+            with self.subTest(slot=slot):
+                self.case.native_maintenance(slot)
+                f=self.case.fixture
+                service=Service('.',self.case.store,io.StringIO());service.package=f.package
+                f.adapter.probe=Mock(return_value=f.device);service.adapters=lambda *_:f.adapter
+                self.assertFalse(self.case.store.list())
+                with patch('backend.uninstall.growth_tools',return_value={'openwrt-uninstall/tools/fixture':b'tool'}),patch('backend.uninstall.base_boot'),patch('backend.uninstall.build'):
+                    result=service.dispatch({'protocol':1,'command':'plan','params':{
+                        'serial':f.device['serial'],'choices':{'method':'uninstall'}}})
+                self.assertIsNone(result['plan']['source_transaction'])
+                self.assertEqual(result['plan']['layout_source'],'device')
+                self.assertEqual(len(self.case.store.list()),1)
+
+    def test_native_maintenance_still_blocks_other_operations(self):
+        self.case.native_maintenance()
+        f=self.case.fixture
+        service=Service('.',self.case.store,io.StringIO());service.package=f.package
+        f.adapter.probe=Mock(return_value=f.device);service.adapters=lambda *_:f.adapter
+        for method in ('part','reinstall','boot','expand'):
+            with self.subTest(method=method),self.assertRaisesRegex(RecoveryRequired,'pending'):
+                service.dispatch({'protocol':1,'command':'plan','params':{
+                    'serial':f.device['serial'],'choices':{'method':method}}})
+        self.assertFalse(self.case.store.list())
+
     def test_stale_checkpoint_does_not_adopt_a_fresh_installation(self):
         _,device,service=self.pending(after=False)
         self.assertIsNone(pending_removal(service,self.f.adapter,device,bytes(4096)))

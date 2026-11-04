@@ -72,10 +72,10 @@ def image(files, block_size=4096, extents=True):
     return bytes(data)
 
 
-def linux_boot(family, mode=b'part\n'):
+def linux_boot(family, mode=b'part\n', *, init=None, extra=None):
     base=fx.boot(family)
-    init=b'#!/bin/busybox sh\n# /etc/e5/part-root\n' if family=='e5' else b'#!/bin/busybox sh\n. /etc/mu300-desktop-storage.sh\n'
-    files={'init':init}
+    if init is None:init=b'#!/bin/busybox sh\n# /etc/e5/part-root\n' if family=='e5' else b'#!/bin/busybox sh\n. /etc/mu300-desktop-storage.sh\n'
+    files={'init':init,**(extra or {})}
     if family=='mu300':files['etc/mu300-desktop-root-mode']=mode
     ram=overlay(files);header=bytearray(base[:4096]);struct.pack_into('<I',header,12,len(ram))
     body=bytes(header)+base[4096:8192]+ram;body=body.ljust((len(body)+4095)&~4095,b'\0')
@@ -128,6 +128,91 @@ class NoOriginalRecord(unittest.TestCase):
         r=self.store.create(f.package,f.device,{'method':'uninstall'},plan)
         context=Context(self.store,r,lambda *_:None);persist(context,meta,files)
         return context
+
+    def native_maintenance(self,slot='b'):
+        from backend.uninstall_boot import build
+        self.configure('mu300',slot)
+        self.fixture.package['profile']='u30pro'
+        self.fixture.adapter.package=self.fixture.package
+        self.fixture.device['profile']='u30pro'
+        self.fs=image({**marker_files('mu300'),'openwrt/etc/mu300/platform':b'u30pro\n'})
+        init=b"#!/bin/busybox sh\n# U30PRO-MU300 storage bootstrap\nlog 'stage=storage-ready'\n. /etc/mu300-desktop-storage.sh\n"
+        self.canonical_native=linux_boot('mu300',init=init)
+        self.boot=build(self.canonical_native,'mu300',{},android_slot=slot)
+
+    def test_native_maintenance_without_history_creates_fresh_plan_and_reaches_backup(self):
+        class BackupBoundary(Exception):pass
+        for slot in ('a','b'):
+            with self.subTest(slot=slot):
+                self.native_maintenance(slot)
+                self.assertFalse(self.store.list())
+                ctx=self.plan()
+                self.assertTrue(ctx.record['uninstall']['installation_evidence']['maintenance'])
+                self.assertIsNone(ctx.record['plan']['source_transaction'])
+                self.assertFalse(ctx.record['plan']['wipe'])
+                self.fixture.adapter.backup=Mock(side_effect=BackupBoundary())
+                with patch('backend.uninstall.growth_tools',return_value={'openwrt-uninstall/tools/fixture':b'tool'}),self.assertRaises(BackupBoundary):
+                    Uninstaller(None,ctx,self.fixture.adapter).arm(self.fixture.device)
+                self.fixture.adapter.backup.assert_called_once_with(self.fixture.device)
+                self.assertFalse(ctx.record['effects'])
+
+    def test_native_maintenance_cannot_bypass_root_identity_slot_or_idle_checks(self):
+        for failure in ('slot','platform','missing-root-marker','mounted','ordinary-prepare','forged-maintenance'):
+            self.native_maintenance()
+            if failure=='slot':
+                self.fixture.device['slot']='_a';self.other='b'
+            if failure=='platform':self.fs=image({**marker_files('mu300'),'openwrt/etc/mu300/platform':b'other-board\n'})
+            if failure=='missing-root-marker':self.fs=image({'openwrt/etc/mu300/platform':b'u30pro\n'})
+            if failure=='mounted':self.idle='BUSY'
+            if failure=='ordinary-prepare':self.boot=linux_boot('mu300',b'prepare\n')
+            if failure=='forged-maintenance':
+                raw=bytearray(linux_boot('mu300'));raw[44:1580]=b'loglevel=5 openwrt.uninstall=1'.ljust(1536,b'\0');self.boot=bytes(raw)
+            with self.subTest(failure=failure),self.assertRaises(RecoveryRequired):self.plan()
+            self.assertFalse(self.store.list())
+
+    def test_fresh_native_removal_backs_up_current_boot_and_arms_a_new_request(self):
+        for slot in ('a','b'):
+            with self.subTest(slot=slot):
+                self.native_maintenance(slot);f=self.fixture;ctx=self.plan()
+                canonical=Path(f.temp.name)/'canonical.img';canonical.write_bytes(self.canonical_native)
+                f.adapter.root=Path(f.temp.name)
+                f.adapter.legacy=SimpleNamespace(payload_file=lambda root,name:canonical)
+                def backup(device):
+                    folder=ctx.directory/'backup';folder.mkdir()
+                    android=bytearray(self.boot);android[44:1580]=bytes(1536)
+                    for name,data in (('boot_'+slot+'.bin',bytes(android)),('boot_'+self.other+'.bin',self.boot)):
+                        self.assertFalse(data[65536:-4096].strip(b'\0'))
+                        with (folder/name).open('wb') as stream:
+                            stream.truncate(len(data));stream.write(data[:65536]);stream.seek(len(data)-4096);stream.write(data[-4096:])
+                    (folder/'misc.bin').write_bytes(bytes(2048)+fx.android_bc(slot)+bytes(2016))
+                    (folder/'checksums.json').write_text(json.dumps({p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.iterdir()}))
+                f.adapter.backup=Mock(side_effect=backup)
+                original_read=f.adb.read.side_effect;original_shell=f.adb.shell.side_effect
+                def read(command):
+                    if command.startswith('dd if=/dev/block/mmcblk0 '):
+                        return self.before[1] if ' skip=' in command else self.before[0]
+                    return original_read(command)
+                def shell(command,**kwargs):
+                    if command.startswith('umask 077; mkdir -p '):return ''
+                    return original_shell(command,**kwargs)
+                f.adb.read.side_effect=read;f.adb.shell.side_effect=shell;f.adb.call=Mock()
+                captured=[]
+                def writer(adapter,device,path,control,folder,**options):
+                    members={n:d for a in archives(path.read_bytes()[8192:8192+struct.unpack_from('<I',path.read_bytes(),12)[0]]) for n,d,m in entries(a)}
+                    self.assertEqual(members['etc/mu300-android-slot'],(slot+'\n').encode())
+                    self.assertEqual(members['openwrt-uninstall/before-first'],self.before[0])
+                    self.assertEqual(members['openwrt-uninstall/before-last'],self.before[1])
+                    captured.append(folder)
+                    return {'planned':{'boot':hashlib.sha256(path.read_bytes()).hexdigest()}}
+                with patch('backend.uninstall.growth_tools',return_value={'openwrt-uninstall/tools/fixture':b'tool'}),\
+                     patch('backend.uninstall.push_chunks'),patch('backend.native_boot.write_android',side_effect=writer):
+                    Uninstaller(None,ctx,f.adapter).arm(f.device)
+                self.assertEqual(captured,['uninstall/native'])
+                self.assertEqual(ctx.record['effects']['uninstall-arm']['state'],'done')
+                self.assertEqual(ctx.record['stage'],'uninstall_offline')
+                self.assertEqual((ctx.directory/'backup'/('boot_'+self.other+'.bin')).stat().st_size,64<<20)
+                f.adapter.backup.assert_called_once_with(f.device)
+                f.adb.call.assert_called_once_with('reboot') # Simulated only.
 
     def test_empty_computer_store_checks_real_markers_and_grows_only_adjacent_root(self):
         for family,slot in (('e5','a'),('mu300','a'),('mu300','b')):
