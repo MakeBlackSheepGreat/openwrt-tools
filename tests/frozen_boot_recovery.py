@@ -36,14 +36,15 @@ def child(root):
             control[4:8]=b'BCAB';control[8]=1;control[9]=2
             control[12],control[14]=(0x9f,0x1e) if slot=='a' else (0x1e,0x9f)
             struct.pack_into('<I',control,28,zlib.crc32(control[:28]))
+            native_targets={'/dev/block/by-name/'+n+'_'+other for n in ('boot','vendor_boot','init_boot','dtbo')}
             def shell(command,**kwargs):
-                if command=='blockdev --getsize64 '+target:return str(64<<20)
-                if command=='sha256sum '+target:return 'a'*64+' boot'
+                if command.startswith('blockdev --getsize64 ') and command.split()[-1] in native_targets:return str(64<<20)
+                if command.startswith('sha256sum ') and command.split()[-1] in native_targets:return 'a'*64+' boot'
                 raise AssertionError('Unexpected device access: '+command)
             def read(command):
                 if 'by-name/misc ' in command:return bytes(control)
-                m=re.fullmatch(r'dd if='+re.escape(target)+r' bs=(\d+)(?: skip=(\d+))? count=(\d+) 2>/dev/null',command)
-                if m:return bytes(int(m[1])*int(m[3]))
+                m=re.fullmatch(r'dd if=(\S+) bs=(\d+)(?: skip=(\d+))? count=(\d+) 2>/dev/null',command)
+                if m and m[1] in native_targets:return bytes(int(m[2])*int(m[4]))
                 raise AssertionError('Unexpected device access: '+command)
             adapter.adb=SimpleNamespace(shell=shell,read=read)
             device={'slot':'_'+slot,'existing':True,'storage':{'ROOT':'fixture-root'}}
