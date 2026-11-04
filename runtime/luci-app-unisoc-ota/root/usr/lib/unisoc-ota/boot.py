@@ -492,6 +492,31 @@ def native_retain(template, payload):
     return payload+metadata+bytes(len(template)-64-end-len(metadata))+bytes(footer)
 
 
+def native_worker_active(execute, busybox, worker):
+    """Check only our exact native-writer invocation with packaged applets.
+
+    Android toybox tr can spin on a /proc cmdline whose process disappeared.
+    pgrep reads process metadata itself; timeout bounds that single process.
+    Explicit result markers also detect su implementations masking exit status.
+    """
+    import re
+    import shlex
+    if not re.fullmatch(r'/data/local/tmp/mu300-desktop-[a-f0-9]{12}/run\.sh',worker):
+        raise ValueError('Invalid native boot worker receipt')
+    previous=worker.rsplit('/',1)[0]+'/busybox'
+    pattern=('^'+re.escape(previous)+' (nsenter -t 1 -m '+re.escape(previous)+' )?sh '+re.escape(worker)+'$')
+    bb=shlex.quote(busybox)
+    command=('rc=0; found=$('+bb+' timeout -s KILL 5 '+bb+' pgrep -f -x '+shlex.quote(pattern)+
+        ' 2>/dev/null) || rc=$?; case "$rc" in '
+        '0) [ -n "$found" ] && echo NATIVE_BUSY ;; '
+        '1) echo NATIVE_IDLE ;; '
+        '*) echo NATIVE_CHECK_FAILED; exit 1 ;; esac')
+    result=execute(command).strip()
+    if result == 'NATIVE_BUSY':return True
+    if result == 'NATIVE_IDLE':return False
+    raise ValueError('Cannot verify the native writer is idle; no write was started / 无法确认原生写入进程已停止，未启动写入')
+
+
 def native_boot_parts(data):
     if (len(data) < 4096 or data[:8] != b'ANDROID!' or
             struct.unpack_from('<I', data, 40)[0] != 4 or

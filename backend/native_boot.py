@@ -60,10 +60,11 @@ def restore_android_companions(adapter, device):
     if len(record['rows']) > 3 or len({r['name'] for r in record['rows']}) != len(record['rows']) or any(r['name'] not in ('vendor_boot','init_boot','dtbo') for r in record['rows']):
         raise RecoveryRequired('Invalid native restoration receipt')
     worker = record.get('worker')
-    if worker:
-        if not re.fullmatch('/data/local/tmp/mu300-desktop-[a-f0-9]{12}/run.sh',worker):
-            raise RecoveryRequired('Invalid native restoration worker')
-        if 'NATIVE_BUSY' in android.shell('for f in /proc/[0-9]*/cmdline; do tr "\\000" "\\n" < "$f" 2>/dev/null | grep -Fx '+worker+' && echo NATIVE_BUSY; done; true').split():
+    if worker and not record.get('complete'):
+        # The shared checker uses the already verified packaged BusyBox.
+        android.push(adapter.legacy.payload_file(adapter.root,'busybox'),'busybox')
+        android.shell('chmod 755 '+android.bb)
+        if codec().native_worker_active(android.shell,android.bb,worker):
             raise RecoveryRequired('Native restoration still running / 原生启动恢复仍在运行，请稍后重试')
     for name in ('vendor_boot','init_boot','dtbo'):
         row = next((r for r in record['rows'] if r['name']==name),None)
