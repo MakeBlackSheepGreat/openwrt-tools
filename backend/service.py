@@ -596,9 +596,7 @@ class Service:
                     self.wait_android(context, adapter)
                 else:
                     if r['choices']['method'] != 'update':
-                        actual = adapter.probe(r['device']['serial'], r['choices']['method'])
-                        if actual.get('cid') != r['device']['cid'] or actual.get('slot') != r['device']['slot']:
-                            raise ValueError('Device identity or Android slot changed since plan / 设备或 Android 槽位与计划不一致')
+                        actual = self.wait_android(context, adapter, require_new_boot=False)
                         # Recompute immediately before execution; do not accept stale TF geometry or GPT gaps.
                         if r['plan'].get('shrink_strategy') == 'online-f2fs':
                             actual['online_shrink'] = inspect_online(adapter,actual)
@@ -636,7 +634,7 @@ class Service:
                           'retryable': not r['unsafe'] or bool(r.get('legacy')) or r.get('online_shrink',{}).get('state') in ('prepared','started','gpt-committed') or r['choices']['method'] in ('uninstall','expand')}
             context.stage(r['stage'], 'failed')
 
-    def wait_android(self, context, adapter):
+    def wait_android(self, context, adapter, *, require_new_boot=True):
         r = context.record
         # No deadline: initialization, debugging and Magisk are user paced.
         while True:
@@ -645,14 +643,14 @@ class Service:
                 device = adapter.probe(r['device']['serial'], r['choices']['method'])
                 readiness = device.get('readiness', 'android_boot')
                 if readiness == 'ready':
-                    if device.get('cid') != r['device']['cid'] or device.get('profile') != r['device']['profile']:
-                        raise RecoveryRequired('Reconnected device differs / 重连设备身份不一致')
-                    if r['plan'].get('two_stage') and r['device'].get('boot_id') and device.get('boot_id') == r['device']['boot_id']:
+                    if any(device.get(key) != r['device'].get(key) for key in ('cid', 'profile', 'slot')):
+                        raise RecoveryRequired('Device identity or Android slot changed since plan / 设备或 Android 槽位与计划不一致')
+                    if require_new_boot and r['plan'].get('two_stage') and r['device'].get('boot_id') and device.get('boot_id') == r['device']['boot_id']:
                         context.stage('android_boot', 'waiting_device')
                         if self.stop.wait(3): raise Cancelled()
                         continue
                     context.stage('root_ready')
-                    return
+                    return device
                 context.stage(readiness, 'waiting_device' if readiness == 'android_boot' else 'waiting_user')
             except (ConnectionError, OSError, TimeoutError, __import__('subprocess').TimeoutExpired):
                 context.stage('android_boot', 'waiting_device')

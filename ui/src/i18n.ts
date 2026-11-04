@@ -1,5 +1,6 @@
 export const strings = {
   zh: {
+    uninstallPreparing:'正在准备卸载',uninstallRootReady:'root 已就绪，继续卸载',
     expandSteps:['检查空间与扩容计划','备份与提交分区边界','Android 扩容与重启','核验实际容量','完成'],expandAndroidPrepare:'准备 Android 挂载前扩容',
     expand:'检查空闲空间并扩容 Android', expandDesc:'查看未分配磁盘空间，优先保留数据扩容 userdata，不移动其他分区。',
     spaceTitle:'未分配磁盘空间',spaceHelp:'这不是 Android 文件系统内的剩余可用空间。仅直接回收紧邻 userdata 尾部的区段；不移动或删除其他分区，也不回收已识别的隐藏文件系统。',spaceScan:'扫描未分配空间',spaceDisk:'磁盘总容量',spaceAndroid:'当前 userdata',spaceTotal:'全部未分配空间',spaceReclaimable:'可直接回收',spaceRange:'区段',spacePosition:'磁盘位置',spaceCanReclaim:'可扩容给 userdata',spaceOccupied:'发现隐藏文件系统，已排除',spaceAlignment:'不足一个可用的对齐区块',spaceNotAdjacent:'未紧邻 userdata，不能直接合并',spaceNone:'GPT 中没有未分配空间。',spaceBlocked:'剩余区段与 userdata 之间有其他分区，或已识别到隐藏系统。本工具不会自动搬移或覆盖它们。',spaceInspectFirst:'检查设备后显示空间区段；扫描不会修改磁盘。',
@@ -92,6 +93,7 @@ export const strings = {
     noBackend:'安装器启动失败。请完整解压安装包，再运行 OpenWrt-Installer.exe。', error:'操作未完成', elapsed:'阶段用时', bytes:'已传输', speed:'速度', packageHint:'请完整解压安装包；载荷校验通过后才能操作设备。',
   },
   en: {
+    uninstallPreparing:'Preparing removal',uninstallRootReady:'Root is ready; continuing removal',
     expandSteps:['Space and expansion plan','Back up and commit boundaries','Android growth and restart','Verify actual capacity','Complete'],expandAndroidPrepare:'Preparing Android pre-mount growth',
     expand:'Inspect free space and expand Android',expandDesc:'Show unallocated disk space and grow userdata, preserving data where supported without moving other partitions.',
     spaceTitle:'Unallocated disk space',spaceHelp:'This differs from free space inside Android. Only an extent immediately after userdata can be reclaimed. Other partitions and detected hidden filesystems are not moved or deleted.',spaceScan:'Scan unallocated space',spaceDisk:'Disk capacity',spaceAndroid:'Current userdata',spaceTotal:'All unallocated space',spaceReclaimable:'Directly reclaimable',spaceRange:'Extent',spacePosition:'Disk position',spaceCanReclaim:'Can extend userdata by',spaceOccupied:'Hidden filesystem detected; excluded',spaceAlignment:'Smaller than a usable aligned block',spaceNotAdjacent:'Not adjacent to userdata',spaceNone:'No unallocated GPT space.',spaceBlocked:'Other partitions or a detected hidden system prevent direct merging. They will not be moved or overwritten.',spaceInspectFirst:'Inspect the device to show extents. Scanning does not modify the disk.',
@@ -184,6 +186,15 @@ export const strings = {
   }
 };
 export type Language = keyof typeof strings;
+export function operationStageLabel(t: (typeof strings)[Language], stage: string, method?: string): string {
+  if (method === 'uninstall') {
+    if (stage === 'prepare') return t.uninstallPreparing;
+    if (stage === 'plan') return t.uninstallPlanReady;
+    if (stage === 'root_ready') return t.uninstallRootReady;
+    if (stage === 'complete') return t.successUninstall;
+  }
+  return t.stages[stage as keyof typeof t.stages] || stage;
+}
 // The two waiting stages where root is the missing piece get their own instructions: `magisk` (adb finds no su at
 // all, so the device is not rooted) and `root_permission` (there is a su, but adb's shell has not been granted it).
 // Every other waiting stage keeps the shared waitingAndroid text.
