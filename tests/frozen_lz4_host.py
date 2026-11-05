@@ -28,7 +28,8 @@ def child():
         contents={name:data for name,data,mode in boot.entries(archives[0])}
         if contents.get('init')!=payload:
             raise AssertionError('Frozen host ramdisk decode changed bytes')
-        if boot.block_decode(b'\x11a\x01\x00')!=b'aaaaaa':
+        # A complete LZ4 block also retains the required trailing literals.
+        if boot.block_decode(b'\x1fa\x01\x00\x00\x50hello')!=b'a'*20+b'hello':
             raise AssertionError('Frozen host overlapping LZ4 decode failed')
     finally:
         ctypes.CDLL=previous
