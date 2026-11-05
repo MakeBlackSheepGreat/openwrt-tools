@@ -564,6 +564,30 @@ def native_image(canonical, templates, name):
     header = bytearray(template[:4096])
     if name == 'vendor_boot':
         _, dtb, config, table = native_vendor_parts(template)
+        product = b'u30pro'
+        # Legacy U30 Pro callers may pass an opaque ramdisk. Its handling stays
+        # unchanged; the new F50 Pro build contract always emits LZ4+CPIO.
+        for archive in archives(ram) if ram[:4] == MAGIC else []:
+            for path, content, mode in entries(archive):
+                if path == 'etc/mu300-model':
+                    if stat.S_IFMT(mode) != stat.S_IFREG or content.strip() not in (b'u30pro', b'f50pro'):
+                        raise ValueError('Invalid native product marker')
+                    product = content.strip()
+        # Keep the canonical boot's historical loglevel=5\0 identity intact.
+        # Model-specific kernel parameters belong to the bound vendor command
+        # line; strip only our owned tokens so repeated OTA cannot accumulate.
+        owned = (b'u30pro_sim_mux.layout=', b'u30pro_ump965x_fgu.battery_present=',
+                 b'u30pro_sgm41513.battery_present=', b'f50pro_external_power_only=')
+        original_tokens = bytes(header[28:2076]).split(b'\0',1)[0].split()
+        tokens = [v for v in original_tokens if not v.startswith(owned)]
+        if product == b'f50pro':
+            tokens += [b'u30pro_sim_mux.layout=mu3356', b'u30pro_ump965x_fgu.battery_present=0',
+                       b'u30pro_sgm41513.battery_present=0', b'f50pro_external_power_only=1']
+        cmdline = b' '.join(tokens)
+        if len(cmdline) >= 2048:
+            raise ValueError('Native vendor command line exceeds capacity')
+        if product == b'f50pro' or any(v.startswith(owned) for v in original_tokens):
+            header[28:2076] = (cmdline+b'\0').ljust(2048,b'\0')
         table = bytearray(table)
         struct.pack_into('<I', table, 0, len(ram))
         struct.pack_into('<I', header, 24, len(ram))

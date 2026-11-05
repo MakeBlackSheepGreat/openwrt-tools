@@ -341,7 +341,7 @@ class Service:
                               (choices.get('method') != 'uninstall' and item['choices'].get('method') == 'uninstall' and item['effects'].get('uninstall-arm') or
                                item['choices'].get('method') == 'expand' and item['effects'].get('expand-gpt')) for item in self.store.list())
                 fresh_native_removal = (choices.get('method') == 'uninstall' and
-                                        self.package.get('profile') == 'u30pro' and device.get('existing'))
+                                        self.package.get('profile') in ('u30pro','f50pro') and device.get('existing'))
                 if pending or (b'openwrt.uninstall=1' in header[44:1580].split(b'\0',1)[0].split() and not fresh_native_removal):
                     raise RecoveryRequired('Storage maintenance is already pending. Resume/import its saved record; do not create another operation. / 已有未完成的存储维护，请继续或导入原记录，不要创建新操作。')
             if choices.get('method') == 'uninstall':
@@ -550,7 +550,7 @@ class Service:
             if read('id -u') != '0':
                 raise ValueError('SSH root required')
             kind = self.package['adapter']
-            profile = read('cat /etc/e5/device-profile' if kind == 'e5' else 'cat /run/mu300/device')
+            profile = read('cat /etc/e5/device-profile' if kind == 'e5' else 'if [ -s /etc/mu300/model ]; then cat /etc/mu300/model; else cat /run/mu300/device; fi')
             cid = read(storage_io.runtime_identity_script(self.package['adapter']))
             if not re.fullmatch('[a-f0-9]{32}', cid):
                 raise ValueError('Cannot establish OpenWrt internal-storage identity / 无法确认 OpenWrt 内置存储身份')

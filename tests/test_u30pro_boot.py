@@ -52,6 +52,33 @@ def native_init(android='b',text=b''):
 
 
 class NativeCodec(unittest.TestCase):
+    def test_f50pro_model_binding_preserves_magic_stock_dtb_and_is_idempotent(self):
+        ram=native_init()+boot.overlay({'etc/mu300-model':(b'f50pro\n',stat.S_IFREG|0o644)})
+        canonical=image(b'NEW',ram)
+        templates={'boot':image(),'vendor_boot':vendor(),'init_boot':image(b'',b'ANDROID')}
+        for _ in range(3):
+            outputs=boot.native_images(canonical,templates)
+            self.assertEqual(outputs['boot'][44:55],b'loglevel=5\0')
+            args=outputs['vendor_boot'][28:2076].split(b'\0',1)[0].split()
+            self.assertEqual(args.count(b'u30pro_sim_mux.layout=mu3356'),1)
+            self.assertEqual(args.count(b'u30pro_ump965x_fgu.battery_present=0'),1)
+            self.assertEqual(args.count(b'u30pro_sgm41513.battery_present=0'),1)
+            self.assertEqual(args.count(b'f50pro_external_power_only=1'),1)
+            self.assertEqual(boot.native_vendor_parts(outputs['vendor_boot'])[1:3],
+                             (b'THIS-UNIT-DTB',b'actual-bootconfig'))
+            templates=outputs
+        # An explicitly selected U30 Pro product restores only owned parameters.
+        u30=image(b'NEW',native_init()+boot.overlay({'etc/mu300-model':(b'u30pro\n',stat.S_IFREG|0o644)}))
+        restored=boot.native_images(u30,templates)
+        self.assertNotIn(b'battery_present=0',restored['vendor_boot'][28:2076])
+        self.assertNotIn(b'layout=mu3356',restored['vendor_boot'][28:2076])
+        self.assertNotIn(b'f50pro_external_power_only=',restored['vendor_boot'][28:2076])
+
+    def test_native_product_marker_is_not_an_arbitrary_parameter_injection(self):
+        bad=native_init()+boot.overlay({'etc/mu300-model':(b'f50pro unsafe=1\n',stat.S_IFREG|0o644)})
+        with self.assertRaisesRegex(ValueError,'product marker'):
+            boot.native_images(image(b'NEW',bad),{'boot':image(),'vendor_boot':vendor(),'init_boot':image(b'',b'ANDROID')})
+
     def test_shared_codec_preserves_device_dtb_config_and_empties_android_init(self):
         templates={'boot':image(),'vendor_boot':vendor(),'init_boot':image(b'',b'ANDROID')}
         actual=boot.native_images(image(b'NEW',b'NEW-RAM'),templates)

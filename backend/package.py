@@ -61,10 +61,14 @@ def inspect_package(directory):
         raise ValueError('Ambiguous E5/MU300 package layouts / 安装包同时包含两种机型系列，无法确定安装流程')
     if mu.is_file():
         manifest = json.loads(mu.read_text(encoding='utf-8'))
+        if manifest.get('product') in ('u30pro','f50pro') and manifest.get('platform') != 'u30pro':
+            raise ValueError('Native product requires its boot adapter / 原生机型缺少对应启动适配器')
         checks = {**manifest['magisk'], **manifest['desktop']}
         adapter, profile, layout, kernel = 'mu300', 'mu300-family', 'mu300root-container', manifest['kernel']
         if manifest.get('platform') == 'u30pro':
-            profile = 'u30pro'
+            profile = manifest.get('product', 'u30pro')
+            if profile not in ('u30pro', 'f50pro'):
+                raise ValueError('Unknown native product profile / 未知原生机型配置')
             for item in ('desktop/native_u30pro.py', 'desktop/boot-runtime.py'):
                 if item not in checks:
                     raise ValueError('Native boot adapter is not covered by package checksums / 原生启动适配文件未纳入安装包校验')
@@ -73,7 +77,7 @@ def inspect_package(directory):
         names = [mapping.get(n, n) for n in ('boot-linux.img', 'mu300-openwrt.tar.gz', 'busybox',
                                              'rootfs-critical.sha256', 'rootfs.requirements')]
         names += [n for n in checks if n.startswith('desktop/files/boot/repair/')]
-        if profile == 'u30pro':
+        if manifest.get('platform') == 'u30pro':
             names += ['desktop/native_u30pro.py', 'desktop/boot-runtime.py']
     else:
         profile_data = e5_profile(root)

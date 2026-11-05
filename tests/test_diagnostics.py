@@ -41,7 +41,10 @@ class Diagnostics(unittest.TestCase):
     def test_actual_exception_is_visible_in_error_and_copyable_after_restart(self):
         service=Service('.',self.store,io.StringIO())
         def fail(*_):raise subprocess.TimeoutExpired(['adb','-s',DEVICE['serial'],'private-root-password'],120)
-        adapter=SimpleNamespace(password='private-root-password',probe=fail)
+        # Probe transport timeouts intentionally remain in the user-paced wait
+        # loop. Exercise a failed operation instead of waiting forever for ADB.
+        self.record['choices']['method']='update'
+        adapter=SimpleNamespace(password='private-root-password',execute=fail)
         service.run(self.ctx,adapter)
         self.assertIn('TimeoutExpired',self.record['error']['message'])
         reopened=Service('.',Store(self.temp.name),io.StringIO())

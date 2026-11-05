@@ -364,7 +364,7 @@ class Uninstaller:
             if family == 'mu300' and 'upstream_os' in proof:
                 paths = mu300_region.marker_paths(proof)
             if proof.get('maintenance'):
-                if family != 'mu300' or self.r['package'].get('profile') != 'u30pro' or version != 3 or 'upstream_os' in proof:
+                if family != 'mu300' or self.r['package'].get('profile') not in ('u30pro','f50pro') or version != 3 or 'upstream_os' in proof:
                     raise RecoveryRequired('Maintenance removal profile differs / 维护卸载的机型或布局不符')
                 paths.add('openwrt/etc/mu300/platform')
             if version == 4 and (not re.fullmatch('[a-f0-9]{64}',proof.get('region_header_sha256','')) or
@@ -476,7 +476,7 @@ class Uninstaller:
         with debug_output(self.ctx):
             if not self.r.get('uninstall_retry_linux_sha256'):
                 inspect_linux_boot(adb.read, int(adb.shell('blockdev --getsize64 /dev/block/by-name/boot_'+other,root=True)), self.adapter.kind, other,
-                    allow_uninstall=(getattr(self.adapter,'package',{}).get('profile') == 'u30pro' and
+                    allow_uninstall=(getattr(self.adapter,'package',{}).get('profile') in ('u30pro','f50pro') and
                                      bool(self.meta.get('installation_evidence',{}).get('maintenance'))))
             self.adapter.backup(device)
         self.ctx.stage('uninstall_prepare')
@@ -566,7 +566,7 @@ class Uninstaller:
         def commit_boot():
             # Cancellation is deferred by Context.effect. Do not terminate a
             # boot write because a host-side command deadline expired.
-            if getattr(self.adapter,'package',{}).get('profile') == 'u30pro':
+            if getattr(self.adapter,'package',{}).get('profile') in ('u30pro','f50pro'):
                 from .native_boot import write_android
                 record = write_android(self.adapter,device,path,trial,'uninstall/native',
                     before_write=layout_checks+bcb_guard+
@@ -620,7 +620,7 @@ class Uninstaller:
                     self.ctx.stage('uninstall_offline','waiting_user',reboot_manually=True)
                 elif self.layout_state() == 'before':
                     if (self.resume_growth and not self.r['plan']['wipe'] and
-                            getattr(self.adapter,'package',{}).get('profile') == 'u30pro'):
+                            getattr(self.adapter,'package',{}).get('profile') in ('u30pro','f50pro')):
                         retry_before = True
                         break
                     raise RecoveryRequired('Android returned before offline removal completed. Keep backups and export diagnostics. / Android 已返回但离线卸载未完成，请保留备份并导出诊断。')
@@ -670,7 +670,7 @@ class Uninstaller:
         operation. The ordinary arm path rechecks installation and userdata
         evidence, retains the original backups, and commits misc last.
         """
-        if (getattr(self.adapter,'package',{}).get('profile') != 'u30pro' or
+        if (getattr(self.adapter,'package',{}).get('profile') not in ('u30pro','f50pro') or
                 self.r['plan']['wipe'] or self.layout_state() != 'before'):
             return False
         from .native_boot import native_receipt
@@ -773,7 +773,7 @@ class Uninstaller:
 
     def recover_arm(self):
         """Recover boot staging by exact readback; never replay a completed GPT edit."""
-        if getattr(self.adapter,'package',{}).get('profile') == 'u30pro':
+        if getattr(self.adapter,'package',{}).get('profile') in ('u30pro','f50pro'):
             from .native_boot import native_receipt
             receipt = native_receipt(self.adapter,self.r['device'],'uninstall/native',self.folder/'boot-uninstall.img')
             if receipt:
@@ -821,7 +821,7 @@ class Uninstaller:
                 return None
             if bc != trial or target != self.r.get('uninstall_boot_sha256'):
                 raise RecoveryRequired('Interrupted boot/misc readback is not recognized / 中断的 boot/misc 回读不符合已保存记录，请保留备份恢复')
-            if getattr(self.adapter,'package',{}).get('profile') == 'u30pro':
+            if getattr(self.adapter,'package',{}).get('profile') in ('u30pro','f50pro'):
                 from .native_boot import codec
                 codec().native_inspect_route(adb.read,lambda command:adb.shell(command,root=True),other)
         self.r['effects']['uninstall-arm'] = {'state':'done','time':time.time(),'result':'verified by recovery readback'}
@@ -911,7 +911,7 @@ class Uninstaller:
             checksums[post_reset.name] = sha(post_reset)
             atomic_json(self.ctx.directory/'backup/checksums.json',checksums)
         normalized_bcb = uninstall_bcb(bcb) if bcb is not None else None
-        if getattr(self.adapter,'package',{}).get('profile') == 'u30pro':
+        if getattr(self.adapter,'package',{}).get('profile') in ('u30pro','f50pro'):
             from .native_boot import restore_android_companions
             restore_android_companions(self.adapter,device)
         if source_hash == target_hash and bc == desired and bcb == normalized_bcb:

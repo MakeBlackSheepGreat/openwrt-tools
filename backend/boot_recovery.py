@@ -142,7 +142,7 @@ def prepare(adapter, device, *, force=False):
         reason = str(error)
         files = {}
     native_before = None
-    if adapter.kind == 'mu300' and getattr(adapter, 'package', {}).get('profile') == 'u30pro':
+    if adapter.kind == 'mu300' and getattr(adapter, 'package', {}).get('profile') in ('u30pro','f50pro'):
         from .native_boot import codec
         native_before = {name:digest_device(adapter.adb, '/dev/block/by-name/'+name+'_'+other)
                          for name in ('vendor_boot','init_boot','dtbo')}

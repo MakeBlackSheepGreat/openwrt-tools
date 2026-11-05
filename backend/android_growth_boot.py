@@ -271,7 +271,7 @@ def stage(worker, device, volume, *, operation='uninstall'):
     remote = '/data/local/tmp/openwrt-'+operation+'-'+record['id']+'-android-growth'
     local = ctx.directory/operation/'android-growth'
     local.mkdir(parents=True, exist_ok=True)
-    container = 'init_boot' if getattr(worker.adapter,'package',{}).get('profile') == 'u30pro' else 'boot'
+    container = 'init_boot' if getattr(worker.adapter,'package',{}).get('profile') in ('u30pro','f50pro') else 'boot'
     boot_path = '/dev/block/by-name/'+container+'_'+slot
     boot_bytes = (8 if container == 'init_boot' else 64) << 20
     if container == 'init_boot':

@@ -33,7 +33,9 @@ def mu300_android(model, board, platform='', expected='mu300-family'):
     profile = 'mu300-family'
     expected_board = None
     matched = False
-    if 'MU5358' in names or any(re.fullmatch(r'U30[ _-]?PRO', n) for n in names):
+    if 'MU3356' in names or any(re.fullmatch(r'F50[ _-]?PRO', n) for n in names):
+        profile, matched = 'f50pro', platform.strip() == 'ums9632'
+    elif any(n in ('MU5358','MU5358D','MU5358E') for n in names) or any(re.fullmatch(r'U30[ _-]?PRO', n) for n in names):
         profile, matched = 'u30pro', platform.strip() == 'ums9632'
     elif 'MU3351' in names or 'V50' in names:
         profile = 'v50'
@@ -43,18 +45,19 @@ def mu300_android(model, board, platform='', expected='mu300-family'):
         profile, matched = 'u30air', True
     elif re.search(r'MU300|F50', model+'\n'+board, re.I):
         profile, matched = 'f50', True
-    matched = matched and ((profile == 'u30pro') == (expected == 'u30pro'))
+    native = ('u30pro','f50pro')
+    matched = matched and (profile == expected if expected in native else profile not in native)
     warning = None if matched else {
-        'expected_profile':expected,'expected_models':['MU5358 / U30 Pro'] if expected == 'u30pro' else list(MU300_MODELS),
+        'expected_profile':expected,'expected_models':['MU3356 / F50 Pro'] if expected == 'f50pro' else ['MU5358 / U30 Pro'] if expected == 'u30pro' else list(MU300_MODELS),
         'expected_board':expected_board,'actual_model':model,'actual_board':board,
         'actual_platform':platform}
     return profile, warning
 
 
 def mu300_runtime(actual, expected='mu300-family'):
-    if actual == 'u30pro' and expected == 'u30pro' or expected != 'u30pro' and actual in ('f50','v50','u30air'):
+    if actual == expected and expected in ('u30pro','f50pro') or expected not in ('u30pro','f50pro') and actual in ('f50','v50','u30air'):
         return None
-    return {'expected_profile':expected,'expected_models':['U30 Pro'] if expected == 'u30pro' else list(MU300_MODELS),
+    return {'expected_profile':expected,'expected_models':['F50 Pro'] if expected == 'f50pro' else ['U30 Pro'] if expected == 'u30pro' else list(MU300_MODELS),
             'expected_board':None,'actual_model':actual.upper(),'actual_board':None}
 
 

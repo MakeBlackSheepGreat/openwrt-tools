@@ -209,7 +209,7 @@ def inspect_installation(adapter, device, root, *, boot_backup=None, recovery_st
                     raise ValueError('Unsupported backup metadata read')
                 bs, skip, count = int(match[1]),int(match[2] or 0),int(match[3])
                 return boot_backup[bs*skip:bs*(skip+count)]
-        native = adapter.kind == 'mu300' and getattr(adapter,'package',{}).get('profile') == 'u30pro' and not region
+        native = adapter.kind == 'mu300' and getattr(adapter,'package',{}).get('profile') in ('u30pro','f50pro') and not region
         boot = inspect_linux_boot(read_boot,boot_size,adapter.kind,other,allow_uninstall=native)
         maintenance = boot.get('maintenance',False)
         start = 4096+((boot['kernel_bytes']+4095)&~4095)

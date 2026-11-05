@@ -93,7 +93,7 @@ def update_mu300(api, args, root):
         if gui:
             gui.validate_ssh(client)
         info = execute(client, '''set -e
-cat /run/mu300/device
+if [ -s /etc/mu300/model ]; then cat /etc/mu300/model; else cat /run/mu300/device; fi
 cat /run/mu300/linux-slot
 cat /run/mu300/misc-dev
 if [ -s /etc/mu300/desktop-mode ]; then cat /etc/mu300/desktop-mode; else
@@ -105,9 +105,9 @@ fi''').strip().splitlines()
             raise ValueError('Not a supported MU300 runtime')
         manifest = json.loads((root/'desktop/manifest.json').read_text(encoding='utf-8'))
         native = manifest.get('platform') == 'u30pro'
-        if native != (info[0] == 'u30pro'):
+        if native != (info[0] in ('u30pro','f50pro')):
             raise ValueError('Package boot layout differs from runtime / 安装包启动布局与当前系统不一致')
-        if info[0] not in ('f50','v50','u30air','u30pro'):
+        if info[0] not in ('f50','v50','u30air','u30pro','f50pro'):
             if gui: gui.confirm_update_profile(info[0])
             elif input('Unknown model '+info[0]+'; type yes to continue / 未匹配机型，输入 yes 继续: ') != 'yes':
                 raise ValueError('Model exception was not confirmed / 尚未确认机型风险')

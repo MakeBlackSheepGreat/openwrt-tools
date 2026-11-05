@@ -125,5 +125,6 @@ class ModelCompatibility(unittest.TestCase):
         with self.assertRaises(ValueError):bound.confirm_update_profile('t551m')
 
 
+
 if __name__ == '__main__':
     unittest.main()
