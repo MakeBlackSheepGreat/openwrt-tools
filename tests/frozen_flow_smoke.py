@@ -121,6 +121,9 @@ def child(package):
             def close(self):
                 pass
 
+            def get_transport(self):
+                return SimpleNamespace(set_keepalive=lambda _:None)
+
             def exec_command(self, command, **kwargs):
                 if (command == 'cat /sys/class/block/mmcblk0/device/cid' or 'openwrt_storage_identity "$d"' in command):
                     value = cid.encode()
@@ -146,7 +149,7 @@ def child(package):
                 loaded = Store(directory).load(record['id'])
                 service.run(Context(store, loaded, service.emit), adapter)
                 if not (loaded['status'] == 'completed' and loaded['result']['filesystem_bytes'] == 4 << 30):
-                    raise AssertionError('Frozen check failed')
+                    raise AssertionError('Frozen final verification failed: '+repr(loaded.get('error')))
             record.update(stage='prepare', status='running', legacy=None, choices={'method': 'tf'}, plan={'method': 'tf', 'openwrt_bytes': 4 << 30, 'grow': True}, effects={'misc-trial' if package_info['adapter'] == 'e5' else 'root-tf-write': {'state': 'done'}})
             store.save(record)
             service.run(Context(store, record, service.emit), adapter)
