@@ -41,7 +41,12 @@ def block_decode(data):
     global _native_decode
     if _native_decode is None:
         helper = Path(__file__).with_name('lz4raw-aarch64.so')
-        if helper.is_file():
+        # This bundled ELF is for Linux AArch64 devices, not a host DLL/dylib.
+        # Windows can show a Bad Image dialog before ctypes raises OSError;
+        # choose the compatible decoder before calling the operating-system loader.
+        native_host = (hasattr(os, 'uname') and os.uname().sysname == 'Linux' and
+                       os.uname().machine.lower() in ('aarch64', 'arm64'))
+        if native_host and helper.is_file():
             try:
                 import ctypes
             except ImportError:

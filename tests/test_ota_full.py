@@ -71,14 +71,52 @@ class BootTests(unittest.TestCase):
     def test_light_python_without_ctypes_can_decode(self):
         import boot
         import builtins
+        from types import SimpleNamespace
         original = builtins.__import__
         def importing(name, *args, **kwargs):
             if name == 'ctypes': raise ImportError('ctypes omitted by python3-light')
             return original(name, *args, **kwargs)
         with tempfile.TemporaryDirectory() as directory:
             helper = Path(directory)/'lz4raw-aarch64.so'; helper.touch()
-            with patch.object(boot, '_native_decode', None), patch.object(boot.Path, 'with_name', return_value=helper), patch.object(builtins, '__import__', side_effect=importing):
+            with patch.object(boot, '_native_decode', None), patch.object(boot.Path, 'with_name', return_value=helper), patch.object(builtins, '__import__', side_effect=importing), patch.object(boot.os, 'uname', return_value=SimpleNamespace(sysname='Linux', machine='aarch64'), create=True):
                 self.assertEqual(boot.block_decode(b'\x50hello'), b'hello')
+
+    def test_foreign_arm64_helper_never_reaches_host_loader(self):
+        import boot
+        import ctypes
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory)/'lz4raw-aarch64.so'
+            helper.write_bytes(b'\x7fELF\x02')
+            for system, machine in (('Windows','AMD64'), ('Darwin','arm64'),
+                                    ('Linux','x86_64'), ('Windows','ARM64')):
+                with self.subTest(system=system, machine=machine), \
+                     patch.object(boot, '_native_decode', None), \
+                     patch.object(boot.Path, 'with_name', return_value=helper), \
+                     patch.object(boot.os, 'uname', return_value=SimpleNamespace(sysname=system, machine=machine), create=True), \
+                     patch.object(ctypes, 'CDLL', side_effect=AssertionError('foreign binary loaded')) as loader:
+                    self.assertEqual(boot.block_decode(b'\x50hello'), b'hello')
+                    loader.assert_not_called()
+
+    def test_linux_arm64_still_uses_packaged_native_decoder(self):
+        import boot
+        import ctypes
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        library = Mock()
+        def decode(data, size, buffer, capacity):
+            ctypes.memmove(buffer, b'hello', 5)
+            return 5
+        library.unisoc_lz4_decode.side_effect = decode
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory)/'lz4raw-aarch64.so'
+            helper.write_bytes(b'\x7fELF\x02')
+            with patch.object(boot, '_native_decode', None), \
+                 patch.object(boot.Path, 'with_name', return_value=helper), \
+                 patch.object(boot.os, 'uname', return_value=SimpleNamespace(sysname='Linux', machine='aarch64'), create=True), \
+                 patch.object(ctypes, 'CDLL', return_value=library) as loader:
+                self.assertEqual(boot.block_decode(b'\x50hello'), b'hello')
+                loader.assert_called_once_with(str(helper))
 
     def test_kernel_and_slot_bindings_and_diagnostic_bytes(self):
         current = bytearray(boot_image('a')); current[56 << 20:(56 << 20)+8] = b'LIVE-LOG'
