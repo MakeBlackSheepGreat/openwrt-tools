@@ -47,12 +47,14 @@ def child(package):
                 return ''
             if command.startswith('set -e; umask 077; dd '):
                 target = next((word[3:] for word in command.split() if word.startswith('of='))).rstrip(';')
-                files[target] = data
+                files[target] = data[:4096] if 'if=/dev/block/by-name/misc ' in command else data
                 return ''
             if command.startswith('sha256sum '):
                 return hashlib.sha256(files[shlex.split(command)[1]]).hexdigest() + ' file'
             if command.startswith('(set -o pipefail; cat '):
                 return hashlib.sha256(data).hexdigest() + ' file'
+            if command.startswith('(set -o pipefail; dd if=/dev/block/by-name/misc '):
+                return hashlib.sha256(data[:4096]).hexdigest() + ' file'
             if command.startswith('rm -f '):
                 files.pop(shlex.split(command)[2], None)
                 return ''
@@ -84,6 +86,21 @@ def child(package):
                 raise AssertionError('Frozen check failed')
             if not not any(('base64' in call or 'gzip' in call for call in calls)):
                 raise AssertionError('Frozen check failed')
+            if package_info['profile']=='f50pro':
+                from backend.adapter import Adapter
+                device['storage']={'CID':cid}
+                adapter=Adapter(package_info,context)
+                adapter.adb=adb
+                adapter.read_gpt=lambda _:dict(first=b'fixture-primary-gpt',last=b'fixture-backup-gpt')
+                adapter.backup(device)
+                backup=context.directory/'backup'
+                sums=json.loads((backup/'checksums.json').read_text())
+                assert 'backup' in record['completed'] and not files
+                for name in ('boot_a.bin','boot_b.bin','sml_a.bin','vbmeta_b.bin'):
+                    assert sums[name]==hashlib.sha256(data).hexdigest()
+                assert not {'dtb_a.bin','dtb_b.bin'} & sums.keys()
+                assert not any('by-name/dtb_' in call for call in calls)
+                rows.append('fresh F50 Pro adapter -> real backup transport; no independent DTB request')
         finally:
             transport.subprocess.Popen = original
         rows.append('device dd -> adb pull, full hash and staging cleanup')

@@ -64,7 +64,7 @@ def child(package, legacy_package=False):
             if legacy_package:
                 assert '| base64' in (package/'OpenWrt-Installer.py').read_text(encoding='utf-8')
             storage={'CID':'a'*32,'NODE':'mmcblk0p30','START':2048,'SIZE':40000000,'DISK_SIZE':60000000}
-            device={'serial':'selected','cid':'a'*32,'slot':'_a','storage':storage}
+            device={'serial':'selected','cid':'a'*32,'slot':'_a','storage':storage,'profile':meta['profile']}
             store=Store(root/'transactions')
             record=store.create(meta,device,{}, {})
             record['completed']=['backup']
@@ -83,6 +83,8 @@ def child(package, legacy_package=False):
             legacy.backup(target,storage)
             assert len(calls)==before
             assert (target/'boot_a.img').read_bytes()==(cache/'boot_a.bin').read_bytes()
+            if meta['profile']=='f50pro':
+                assert not (target/'dtb_a.img').exists() and not (target/'dtb_b.img').exists()
             assert (target/'SHA256SUMS').is_file()
         assert all('base64' not in script and 'exec-out' not in script for script in scripts)
     print(json.dumps({'package':package.name,'frozen_backend':True,'raw_bytes_verified':True,

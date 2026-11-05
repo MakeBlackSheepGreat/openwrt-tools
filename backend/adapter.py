@@ -239,8 +239,6 @@ class Adapter:
         sums=json.loads((source/'checksums.json').read_text())
         mapping={'misc-head.bin':'misc.bin','gpt-first.bin':'gpt-first.bin','gpt-last.bin':'gpt-last.bin'}
         mapping.update({f'{name}_{slot}.img':f'{name}_{slot}.bin' for name in ('boot','uboot','sml','teecfg','trustos','vbmeta') for slot in ('a','b')})
-        if self.ctx.record['device'].get('profile')=='f50pro':
-            mapping.update({f'dtb_{slot}.img':f'dtb_{slot}.bin' for slot in ('a','b')})
         if any(name not in sums or sha(source/name)!=sums[name] for name in mapping.values()):
             raise ValueError('Verified backup is incomplete or damaged / 已校验备份缺失或损坏')
         snapshots = {}
@@ -460,7 +458,6 @@ class Adapter:
         atomic_json(destination/'identity.json', device)
         try:
             cohort = ('boot', 'uboot', 'sml', 'teecfg', 'trustos', 'vbmeta')
-            if device.get('profile') == 'f50pro': cohort += ('dtb',)
             if device.get('profile') == 'changxing60': cohort += ('dtbo', 'vendor_boot')
             for name in ['misc'] + [f'{n}_{slot}' for n in cohort for slot in ('a', 'b')]:
                 self.ctx.boundary()

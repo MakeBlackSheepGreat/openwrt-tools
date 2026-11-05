@@ -1,5 +1,6 @@
 """Device dd -> adb pull backup tests; transport and device files are simulated."""
 import hashlib
+import json
 from pathlib import Path
 import re
 import shlex
@@ -12,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from backend.state import Context,Store,Cancelled
 from backend.transport import Adb
+from backend.adapter import Adapter
 
 
 class Pull:
@@ -54,6 +56,7 @@ class Backup(unittest.TestCase):
             self.remote[match[1]]=self.data;return ''
         if script.startswith('sha256sum '):return hashlib.sha256(self.remote[shlex.split(script)[1]]).hexdigest()+'  file'
         if script.startswith('(set -o pipefail; cat '):return hashlib.sha256(self.data).hexdigest()+'  -'
+        if script.startswith('(set -o pipefail; dd if=/dev/block/by-name/misc '):return hashlib.sha256(self.data[:4096]).hexdigest()+'  -'
         if script.startswith('rm -f '):self.remote.pop(shlex.split(script)[2],None);return ''
         if script.startswith('rmdir '):return ''
         self.fail('Unexpected backup command: '+script)
@@ -89,10 +92,33 @@ class Backup(unittest.TestCase):
                 self.assertFalse(self.remote)
 
     def test_unrelated_or_invalid_backup_partition_still_rejected(self):
-        for name in ('userdata','super','dtbo_c','vendor_boot_a;reboot'):
+        for name in ('userdata','super','dtb','dtb_a','dtb_b','dtb_c','dtb_a/../userdata','dtb_a;reboot','dtbo_c','vendor_boot_a;reboot'):
             with self.subTest(name=name),self.assertRaisesRegex(ValueError,'Unsupported'):
                 self.run_backup(name)
         self.assertFalse(self.commands)
+
+    def test_f50pro_adapter_runs_entire_fresh_backup_through_real_transport(self):
+        # No cached backups and no mock backup_partition: reproduce the exact
+        # adapter -> whitelist -> dd -> pull -> hash path that failed in release.
+        self.data=bytes(range(256))*16
+        device={'serial':'selected','profile':'f50pro','storage':{'CID':'a'*32}}
+        self.record['device']=device
+        adapter=Adapter.__new__(Adapter);adapter.ctx=self.ctx;adapter.adb=self.adb
+        with patch.object(adapter,'read_gpt',return_value={'first':b'first-gpt','last':b'last-gpt'}), \
+             patch.object(self.adb,'shell',side_effect=self.shell), \
+             patch('backend.transport.subprocess.Popen',side_effect=self.popen):
+            adapter.backup(device)
+        backup=self.ctx.directory/'backup'
+        checksums=json.loads((backup/'checksums.json').read_text())
+        self.assertIn('backup',self.record['completed'])
+        for name in ('boot_a.bin','boot_b.bin','misc.bin'):
+            self.assertEqual((backup/name).read_bytes(),self.data)
+            self.assertEqual(checksums[name],hashlib.sha256(self.data).hexdigest())
+        self.assertFalse(self.remote)
+        self.assertNotIn('backup_staging',self.record)
+        self.assertFalse({'dtb_a.bin','dtb_b.bin'} & checksums.keys())
+        self.assertFalse(any('by-name/dtb_' in c for c in self.commands))
+        self.assertFalse(any('by-name/userdata' in c or 'by-name/super' in c for c in self.commands))
 
     def test_bad_download_preserves_existing_backup_and_cleans_staging(self):
         self.target.write_bytes(b'existing verified backup');self.corrupt=True
