@@ -250,6 +250,19 @@ def metadata(image, family, wanted):
 MU300_STORAGE = ('etc/mu300-root-target', 'etc/mu300-desktop-root-mode',
                  'etc/mu300-desktop-identity')
 
+# The Pro canonical image deliberately has no installation-specific storage
+# adapter. Its installed init sources these files before mounting OpenWrt.
+# Bind the working adapter and its offline filesystem tools, never an old
+# kernel/module tree or a complete previous ramdisk.
+NATIVE_STORAGE = ('etc/mu300-desktop-storage.sh', 'etc/mu300-internal-ext4.sh',
+                  'etc/part-progress.sh', 'etc/part-prepare.sh',
+                  'etc/install-part.sh', 'etc/ext4-geometry.sh',
+                  'usr/share/mu300-gpt')
+
+
+def _native_storage(name):
+    return name in NATIVE_STORAGE or name.startswith('repair/')
+
 
 def _role(name):
     return name in MU300_STORAGE or name.startswith('etc/misc-bc-') or name in (
@@ -259,15 +272,25 @@ def _role(name):
 
 
 class Binder:
-    """Retain only boot metadata; skip module payloads a decoded block at a time."""
+    """Bind device metadata/storage tools, skipping kernels and module payloads."""
     def __init__(self, current, family):
         self.current = current; self.family = family
-        self.fields = metadata(current, family, lambda n: n == 'init' or _role(n))
+        self.fields = metadata(current, family, lambda n: n == 'init' or _role(n) or
+                               (family == 'mu300' and _native_storage(n)))
         if 'init' not in self.fields: raise ValueError('Boot init missing')
         self.init = self.fields['init'][0].decode().replace('\r\n', '\n')
         self.needs_guard = ('# unisoc-ota-recovery-v2' not in self.init or
                             'mount --bind /dev "$ota_ram/target/dev"' not in self.init)
         self.roles = {n:v for n,v in self.fields.items() if _role(n)}
+        self.native = family == 'mu300' and '# U30PRO-MU300 storage bootstrap' in self.init
+        if self.native:
+            self.roles.update({n:v for n,v in self.fields.items() if _native_storage(n)})
+            # prepare/install helpers can call the same verified tools outside
+            # /repair. Preserve only aliases actually backed by that bundle.
+            # Do not select all /lib or /usr: those could include stale modules.
+            aliases = {n.removeprefix('repair/') for n in self.fields if n.startswith('repair/')}
+            if aliases:
+                self.roles.update(metadata(current, family, lambda n: n in aliases))
         if family == 'mu300':
             # A release boot is TF-only; the installed device may use an
             # internal partition/region instead. Preserve absence too: an old
@@ -284,6 +307,13 @@ class Binder:
             values = metadata(image, self.family, lambda n:n == 'init')
             if 'init' not in values: raise ValueError('Boot init missing')
             init = values['init'][0].decode().replace('\r\n', '\n')
+        if self.native and '. /etc/mu300-desktop-storage.sh' in init:
+            # Check before the OTA journal permits any boot/root writes. An
+            # image hash/readback alone cannot prove its init can mount root.
+            required = ('etc/mu300-desktop-storage.sh', 'etc/mu300-internal-ext4.sh')
+            if any(n not in self.roles for n in required):
+                raise ValueError('Installed native storage adapter is incomplete; no boot was written / '
+                                 '已安装的原生存储启动脚本不完整，未写入启动镜像')
         if '# unisoc-ota-recovery-v2' in init:
             old = '    mount --bind /newroot "$ota_ram/target" || exec /bin/sh'
             if 'mount --bind /dev "$ota_ram/target/dev"' not in init:
@@ -295,7 +325,10 @@ class Binder:
                       '    log "stage=switch-root root=')
             if init.count(anchor) != 1: raise ValueError('Cannot locate boot recovery hook')
             init = init.replace(anchor, HOOK+'\n'+anchor)
-        roles = dict(self.roles); roles['init'] = (init.encode(), stat.S_IFREG|0o755)
+        # The original guard already contains its storage tools. Appending
+        # another complete copy would waste RAM and boot payload capacity.
+        roles = {n:v for n,v in self.roles.items() if not original or _role(n)}
+        roles['init'] = (init.encode(), stat.S_IFREG|0o755)
         extra = overlay(roles)
         header = bytearray(image[:4096]); struct.pack_into('<I', header, 12, size+len(extra))
         header[44:1580] = self.current[44:1580]

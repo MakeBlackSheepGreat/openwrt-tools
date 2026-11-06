@@ -52,6 +52,69 @@ def native_init(android='b',text=b''):
 
 
 class NativeCodec(unittest.TestCase):
+    def test_ota_keeps_installed_storage_adapter_tools_and_aliases_not_old_modules(self):
+        required = b'. /etc/mu300-desktop-storage.sh\n'
+        helper = (b'. /etc/mu300-storage.sh\n. /etc/mu300-internal-ext4.sh\n'
+                  b'desktop_mount_root() { echo installed-layout; }\n')
+        files = {name: (b'# installed '+name.encode()+b'\n', stat.S_IFREG|0o644)
+                 for name in boot.NATIVE_STORAGE}
+        files['etc/mu300-desktop-storage.sh'] = (helper, stat.S_IFREG|0o644)
+        files.update({
+            'repair/usr/sbin/e2fsck': (b'OFFLINE-FSCK', stat.S_IFREG|0o755),
+            'repair/lib/ld-musl-aarch64.so.1': (b'REPAIR-LIBC', stat.S_IFREG|0o755),
+            'repair/lib/libc.so': (b'ld-musl-aarch64.so.1', stat.S_IFLNK|0o777),
+            'usr/sbin/e2fsck': (b'OFFLINE-FSCK', stat.S_IFREG|0o755),
+            'lib/ld-musl-aarch64.so.1': (b'REPAIR-LIBC', stat.S_IFREG|0o755),
+            'lib/libc.so': (b'ld-musl-aarch64.so.1', stat.S_IFLNK|0o777),
+            'lib/modules/old/wifi.ko': (b'OLD-MODULE', stat.S_IFREG|0o644),
+            'usr/lib/unrelated.so': (b'UNRELATED', stat.S_IFREG|0o644),
+        })
+        for slot, mode in (('a', b'part\n'), ('b', b'data-image\n'), ('b', b'sd\n')):
+            with self.subTest(slot=slot, mode=mode):
+                current = image(b'OLD', native_init(slot, required) + boot.overlay(files) +
+                                boot.overlay({'etc/mu300-desktop-root-mode': (mode, stat.S_IFREG|0o644)}), 64 << 20)
+                incoming = image(b'NEW', native_init('a', required + b'# new init') + boot.overlay({
+                    'etc/mu300-storage.sh': (b'# current storage discovery\n', stat.S_IFREG|0o644),
+                    'lib/modules/new/wifi.ko': (b'NEW-MODULE', stat.S_IFREG|0o644),
+                }), 64 << 20)
+                sizes = []
+                for _ in range(3):
+                    current = boot.bind(incoming, current, 'mu300')
+                    members = boot.metadata(current, 'mu300', lambda _: True)
+                    self.assertEqual(boot.native_boot_parts(current)[0], b'NEW')
+                    self.assertIn(b'# new init', members['init'][0])
+                    self.assertEqual(members['etc/mu300-android-slot'][0], (slot+'\n').encode())
+                    self.assertEqual(members['etc/mu300-desktop-root-mode'][0], mode)
+                    for name, value in files.items():
+                        if name.startswith('lib/modules/') or name == 'usr/lib/unrelated.so':
+                            self.assertNotIn(name, members)
+                        else:
+                            self.assertEqual(members[name], value)
+                    self.assertEqual(members['etc/mu300-storage.sh'][0], b'# current storage discovery\n')
+                    self.assertEqual(members['lib/modules/new/wifi.ko'][0], b'NEW-MODULE')
+                    sizes.append(len(boot.native_boot_parts(current)[1]))
+                self.assertEqual(len(set(sizes)), 1, 'repeated OTA must not grow storage tools')
+
+    def test_native_missing_installed_adapter_fails_before_boot_writes(self):
+        required = b'. /etc/mu300-desktop-storage.sh\n'
+        current = image(b'OLD', native_init('b', required), 64 << 20)
+        with self.assertRaisesRegex(ValueError, 'storage adapter is incomplete'):
+            boot.bind(image(b'NEW', native_init('a', required), 64 << 20), current, 'mu300')
+
+    def test_file_only_native_guard_does_not_duplicate_repair_tool_bundle(self):
+        tools = b'UNIQUE-OFFLINE-TOOL-' * 5000
+        current = image(b'OLD', native_init('b', b'. /etc/mu300-desktop-storage.sh\n') + boot.overlay({
+            'etc/mu300-desktop-storage.sh': (b'# adapter\n', stat.S_IFREG|0o644),
+            'etc/mu300-internal-ext4.sh': (b'# fsck\n', stat.S_IFREG|0o644),
+            'repair/usr/sbin/e2fsck': (tools, stat.S_IFREG|0o755),
+        }), 64 << 20)
+        guarded = boot.bind(current, current, 'mu300')
+        ram = boot.native_boot_parts(guarded)[1]
+        copies = sum(name == 'repair/usr/sbin/e2fsck'
+                     for archive in boot.archives(ram) for name, _, _ in boot.entries(archive))
+        self.assertEqual(copies, 1)
+        self.assertIn('unisoc-ota-recovery-v2', boot.metadata(guarded, 'mu300', lambda n:n == 'init')['init'][0].decode())
+
     def test_f50pro_model_binding_preserves_magic_stock_dtb_and_is_idempotent(self):
         ram=native_init()+boot.overlay({'etc/mu300-model':(b'f50pro\n',stat.S_IFREG|0o644)})
         canonical=image(b'NEW',ram)
@@ -220,6 +283,57 @@ class NativeOTA(unittest.TestCase):
     def apply(self):
         with mock.dict(os.environ,UNISOC_OTA_LIVE='1',UNISOC_OTA_RAM=str(self.ram)),Patch(self.patch) as patch:
             return self.engine.apply(patch)
+
+    def storage_update_and_undo(self, profile, android_slot):
+        linux = 'b' if android_slot == 'a' else 'a'
+        required = b'. /etc/mu300-desktop-storage.sh\n'
+        helpers = {
+            'etc/mu300-desktop-storage.sh': (b'. /etc/mu300-internal-ext4.sh\n', stat.S_IFREG|0o644),
+            'etc/mu300-internal-ext4.sh': (b'# installed fsck adapter\n', stat.S_IFREG|0o644),
+            'repair/usr/sbin/e2fsck': (b'INSTALLED-FSCK', stat.S_IFREG|0o755),
+            'etc/mu300-model': ((profile+'\n').encode(), stat.S_IFREG|0o644),
+        }
+        old = image(b'OLD', native_init(android_slot, required)+boot.overlay(helpers), 64 << 20)
+        native = boot.native_images(old, {'boot': old, 'vendor_boot': vendor(), 'init_boot': image(b'', b'ANDROID')})
+        for name, raw in native.items():
+            (self.parts/(name+'_'+linux)).write_bytes(raw)
+            (self.parts/(name+'_'+android_slot)).write_bytes(b'ANDROID-'+name.encode())
+        before = {p.name: boot.native_hash(p) for p in self.parts.iterdir()}
+        (self.root/'run/mu300/linux-slot').write_text(linux+'\n')
+        (self.root/'run/mu300/android-slot').write_text(android_slot+'\n')
+        release = self.root/'etc/mu300/release.json'
+        release.write_text(json.dumps(dict(profile=profile, image_version=profile+'-r1', kernel_release='6.12.94-u30pro-p1')))
+        incoming = image(b'NEW', native_init('a', required+b'# latest init') +
+                         boot.overlay({'etc/mu300-model': ((profile+'\n').encode(), stat.S_IFREG|0o644)}), 64 << 20)
+        with Patch(self.patch) as previous:
+            m = dict(previous.manifest)
+        h = hashlib.sha256(incoming).hexdigest()
+        m.update(profile=profile, base_version=profile+'-r1', target_version=profile+'-r2', boot=dict(sha256=h, size=len(incoming)))
+        self.patch = package(self.patch, m, {h: incoming, hashlib.sha256(b'new').hexdigest(): b'new'})
+        self.assertEqual(self.apply()['status'], 'complete')
+        updated = (self.parts/('boot_'+linux)).read_bytes()
+        members = boot.metadata(updated, 'mu300', lambda _: True)
+        self.assertEqual(boot.native_boot_parts(updated)[0], b'NEW')
+        self.assertEqual(boot.native_vendor_parts((self.parts/('vendor_boot_'+linux)).read_bytes())[0],
+                         boot.native_boot_parts(updated)[1])
+        self.assertEqual(list(boot.entries(next(boot.archives(boot.native_boot_parts(
+            (self.parts/('init_boot_'+linux)).read_bytes())[1])))), [])
+        for name, value in helpers.items(): self.assertEqual(members[name], value)
+        self.assertEqual(members['etc/mu300-android-slot'][0], (android_slot+'\n').encode())
+        for name in boot.NATIVE_IMAGES:
+            self.assertEqual(boot.native_hash(self.parts/(name+'_'+android_slot)), before[name+'_'+android_slot])
+        self.assertEqual((self.root/'usr/lib/user-plugin').read_bytes(), b'keep')
+        self.assertTrue(self.engine.rollback_check()['available'])
+        journal = self.engine.state/'journal.json'
+        value = json.loads(journal.read_text()); value['status'] = 'rolling_back'; journal.write_bytes(canonical(value))
+        self.engine.recover()
+        self.assertEqual({p.name: boot.native_hash(p) for p in self.parts.iterdir()}, before)
+
+    def test_u30pro_real_storage_dependencies_survive_update_and_undo(self):
+        self.storage_update_and_undo('u30pro', 'b')
+
+    def test_f50pro_reverse_slot_storage_dependencies_survive_update_and_undo(self):
+        self.storage_update_and_undo('f50pro', 'a')
 
     def test_update_then_undo_restores_all_three_and_preserves_plugins_android(self):
         self.assertEqual(self.apply()['status'],'complete')
