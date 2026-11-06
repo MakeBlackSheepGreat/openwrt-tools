@@ -13,6 +13,7 @@ from unittest.mock import Mock,patch
 
 HERE=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(HERE));sys.path.insert(0,str(HERE/'mobile/python'))
+sys.path.insert(0,str(HERE/'mobile/vendor/adb_shell-0.4.4-py3-none-any.whl'))
 from android_host.adb import Registry,Driver
 from android_host.network import connect
 from backend import host
@@ -21,6 +22,25 @@ from backend.ota_desktop import collect,execute,send
 
 
 class Connections(unittest.TestCase):
+    def test_maintenance_upload_budget_reaches_mobile_filesync_and_does_not_retry(self):
+        from backend.transport import Adb
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'helper';path.write_bytes(b'maintenance fixture')
+            client=Mock();registry=Registry(Mock(),d);registry.clients['tcp:fixture']=client
+            provider=Mock();provider.adb.return_value=Driver(registry,'tcp:fixture')
+            with patch.object(host,'_provider',provider):
+                adb=Adb(d,'tcp:fixture')
+                adb.call('push',str(path),'/data/local/tmp/fixture',timeout=888)
+                options=client.push.call_args.kwargs
+                self.assertEqual((options['transport_timeout_s'],options['read_timeout_s']),(888,888))
+                client.push.side_effect=OSError('filesync timed out')
+                with self.assertRaisesRegex(ConnectionError,'filesync timed out'):
+                    adb.call('push',str(path),'/data/local/tmp/fixture',timeout=888)
+            self.assertEqual(client.push.call_count,2)
+            client.close.assert_called_once()
+            self.assertNotIn('tcp:fixture',registry.clients)
+            client.streaming_shell.assert_not_called()
+
     def test_heartbeat_split_at_any_packet_boundary_is_not_command_output(self):
         for stride in (1,3,31,59,123):
             with self.subTest(stride=stride),tempfile.TemporaryDirectory() as d:

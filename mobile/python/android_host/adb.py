@@ -58,6 +58,9 @@ class Registry:
                 def connect(self,timeout):
                     self._connection=registry.tcp_connection((self._host,self._port),timeout)
                     self._connection.setblocking(False)
+                def bulk_write(self,data,timeout):
+                    from .network import write_all
+                    return write_all(self._connection,data,timeout)
             hostname,port=self.tcp[serial]
             client=AdbDevice(LanTransport(hostname,port),default_transport_timeout_s=20)
         else:

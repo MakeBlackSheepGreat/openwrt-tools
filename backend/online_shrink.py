@@ -34,6 +34,12 @@ class OnlineDecision(Exception):
 SB_VERSION, SB_VERSION_END, SB_CRC = 0x684, 0x784, 3072-4
 SB_FEATURE, SB_CHKSUM = 0x884, 0x800
 
+# FileSync waits for the Android filesystem to acknowledge the upload. During
+# online storage maintenance that acknowledgement, and the subsequent sync,
+# can take longer than an ordinary discovery command. Keep the user's chosen
+# maintenance budget here, including in the embedded Android ADB driver.
+PREPARE_TIMEOUT = 888
+
 
 def valid_superblock_checksum(sb):
     if not struct.unpack_from('<I', sb, SB_FEATURE)[0] & SB_CHKSUM:
@@ -251,9 +257,9 @@ class OnlineShrink:
                 self.ctx.boundary()
             remote = self.remote+'/'+name
             staged = '/data/local/tmp/online-upload-'+self.r['id']
-            self.a.adb.call('push',str(local),staged,timeout=60)
+            self.a.adb.call('push',str(local),staged,timeout=PREPARE_TIMEOUT)
             try:
-                self.a.adb.shell(f'set -e; cp {staged} {remote}; chmod 700 {remote}; sync',root=True)
+                self.a.adb.shell(f'set -e; cp {staged} {remote}; chmod 700 {remote}; sync',root=True,timeout=PREPARE_TIMEOUT)
                 if self.a.adb.shell('sha256sum '+remote,root=True).split()[0] != sha(local):
                     raise ValueError('Online resize transfer checksum failed / 在线缩容工具传输校验失败')
             finally:
@@ -415,7 +421,7 @@ class OnlineShrink:
             self.stage()
             if info['blocks'] == j['old_blocks']:
                 try:
-                    self.a.adb.shell(f'{self.tool} probe /data '+shlex.quote(info['volume']['source']),root=True,timeout=600)
+                    self.a.adb.shell(f'{self.tool} probe /data '+shlex.quote(info['volume']['source']),root=True,timeout=PREPARE_TIMEOUT)
                 except AdbCommandError as error:
                     return self.decision('Kernel online-resize probe failed / 内核在线缩容能力检查失败: '+str(error))
             if j['state'] == 'prepared':

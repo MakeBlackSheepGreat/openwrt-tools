@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from backend import gpt
 from backend.online_shrink import (OnlineShrink, OnlineDecision, allocation, candidate,
-    fallback_plan, helper_files, inspect, superblocks)
+    fallback_plan, helper_files, inspect, superblocks, PREPARE_TIMEOUT)
 from backend.service import plan_install, Service
 from backend.state import Context, Pending, RecoveryRequired, Store, sha
 from backend.uninstall import partition, restored_layout, table
@@ -229,6 +229,52 @@ class OnlineTests(unittest.TestCase):
                 with self.assertRaises(Pending):job.run()
                 stage.assert_not_called();a.adb.call.assert_called_once_with('reboot')
                 self.assertEqual(r['online_shrink']['state'],'gpt-committed')
+
+    def test_prepare_upload_and_sync_allow_slow_android_storage(self):
+        for block,kind in ((512,'mu300'),(4096,'e5')):
+            with self.subTest(block=block,kind=kind),tempfile.TemporaryDirectory() as temp:
+                job,r,a,_,_=self.job(temp,block,kind)
+                r['online_shrink']['state']='prepared'
+                uploaded=[]
+                def upload(operation,local,remote,timeout):
+                    self.assertEqual(operation,'push')
+                    self.assertEqual(timeout,888)
+                    uploaded.append(Path(local))
+                def shell(command,root,timeout=20):
+                    if command.startswith('set -e; cp '):
+                        self.assertEqual(timeout,888)
+                    if command.startswith('sha256sum '):
+                        return sha(uploaded[-1])+'  fixture\n'
+                    return ''
+                a.adb.call.side_effect=upload;a.adb.shell.side_effect=shell
+                job.stage()
+                self.assertEqual(len(uploaded),5)
+                self.assertEqual({p.name for p in uploaded},{'f2fs-online-arm64','old-first','old-last','new-first','new-last'})
+                self.assertEqual(r['online_shrink']['state'],'prepared')
+                self.assertFalse(any(' start ' in str(c) for c in a.adb.shell.call_args_list))
+
+    def test_failed_prepare_upload_cannot_launch_or_offer_erasing_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            job,r,a,old,_=self.job(temp)
+            r['online_shrink']['state']='prepared'
+            a.adb.call.side_effect=ConnectionError('filesync acknowledgement timed out')
+            with patch.object(job,'pair',return_value=old),patch('backend.online_shrink.inspect',return_value=r['device']['online_shrink']):
+                with self.assertRaisesRegex(ConnectionError,'filesync'):
+                    job.run()
+            self.assertEqual(r['online_shrink']['state'],'prepared')
+            self.assertNotIn('online_fallback',r)
+            self.assertFalse(any(' start ' in str(c) for c in a.adb.shell.call_args_list))
+
+    def test_prepare_checksum_failure_stops_before_worker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            job,r,a,_,_=self.job(temp)
+            r['online_shrink']['state']='prepared'
+            a.adb.shell.side_effect=lambda command,**kw: '0'*64+'  bad\n' if command.startswith('sha256sum ') else ''
+            with self.assertRaisesRegex(ValueError,'checksum'):
+                job.stage()
+            self.assertEqual(a.adb.call.call_count,1)
+            self.assertNotIn('online_fallback',r)
+            self.assertEqual(r['online_shrink']['state'],'prepared')
 
     def test_commit_resumed_in_later_android_boot_waits_for_that_boot(self):
         with tempfile.TemporaryDirectory() as temp:
