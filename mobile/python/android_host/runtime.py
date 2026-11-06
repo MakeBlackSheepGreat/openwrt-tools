@@ -124,7 +124,18 @@ class Runtime:
         import tempfile
         tempfile.tempdir=str(cache)
         self.service=Service(self.directory/'packages',Store(self.directory),EventStream(native))
+        self._run_worker=self.service.run
+        self.service.run=self.run_worker
         self.dispatch_lock=threading.RLock()
+
+    def run_worker(self,*args,**kwargs):
+        # This callback is independent of the Activity/protocol listener. Keep
+        # protection until cleanup and device locks have actually been released,
+        # including cancellation and decisions which return without a terminal event.
+        try:
+            self.native.backendTaskChanged(True)
+            return self._run_worker(*args,**kwargs)
+        finally:self.native.backendTaskChanged(False)
 
     def emit(self,kind,data):
         self.native.emitProtocol(json.dumps({'protocol':1,'type':kind,'data':data})+'\n')

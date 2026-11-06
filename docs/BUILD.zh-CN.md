@@ -29,6 +29,12 @@ python3 tools/build-release.py run --workspace /home/kano/openwrt-build --label 
 
 ## Android ARM64
 
+Android 的耗时操作使用前台服务与 CPU 唤醒锁，并在 App 前台显示时保持屏幕常亮。
+安装、更新、卸载的保护跟随后台执行器，在清理完成或安全暂停返回后释放；
+导入、分析、导出等同步任务按独立租约管理，不会提前释放仍在运行的安装任务。
+页面／Activity 重建后会恢复当前任务的屏幕保护。用户主动锁屏或切到后台时，
+Android 仍可关闭显示，后台 CPU 保护和操作通知继续保留；本功能不修改系统休眠设置。
+
 复用 SDK D:/Android/Sdk、NDK27.0.12077973、既有 JDK21、Python3.13 与 Gradle/Rust 缓存。
 
 ```sh

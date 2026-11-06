@@ -41,6 +41,8 @@ object MobileRuntime {
     lateinit var directory: File
     private lateinit var deviceNetwork: DeviceNetwork
     fun bindTcpSocket(fd: Int, address: String): Boolean = deviceNetwork.bindSocket(fd, address)
+    // Called by the process-owned Python worker even with no WebView listener.
+    fun backendTaskChanged(active: Boolean) = TaskProtection.backend(active)
     @Synchronized fun get(activity: Activity): PyObject {
         runtime?.let { return it }
         val context = activity.applicationContext
@@ -75,30 +77,24 @@ class MobileHostPlugin(private val activity: Activity) : Plugin(activity) {
     private var dialog: Triple<String, String, String>? = null
     override fun load(webView: WebView) {
         super.load(webView)
+        TaskProtection.attach(activity)
         MobileRuntime.listener = WeakReference(this)
     }
     fun emit(line: String) {
         val event = JSObject(line)
         trigger("backend", event)
-        val type = event.optString("type")
-        val data = event.optJSONObject("data")
-        if (type == "transaction") {
-            val status = data?.optString("status")
-            if (status in listOf("completed", "failed", "cancelled")) stopTask()
-        }
     }
-    private fun startTask(local: Boolean = false) {
+    private fun startTask(local: Boolean = false): Long {
         val preferences = activity.getSharedPreferences("openwrt-tools", Context.MODE_PRIVATE)
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(activity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !preferences.getBoolean("notification-requested", false)) {
             preferences.edit().putBoolean("notification-requested", true).apply()
             activity.runOnUiThread { ActivityCompat.requestPermissions(activity, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 410) }
         }
-        InstallerTaskService.beginTask(activity.applicationContext, local)
+        return TaskProtection.begin(local)
     }
     private fun language(args: HostRequest) {
         if (args.language in listOf("zh", "en")) activity.getSharedPreferences("openwrt-tools", Context.MODE_PRIVATE).edit().putString("language", args.language).apply()
     }
-    private fun stopTask() { InstallerTaskService.finishTask(activity.applicationContext) }
     private fun resolve(invoke: Invoke, value: Any?, key: String = "value") {
         invoke.resolve(JSObject().put(key, value ?: JSONObject.NULL))
     }
@@ -117,23 +113,23 @@ class MobileHostPlugin(private val activity: Activity) : Plugin(activity) {
         language(args)
         worker.execute {
             var completed = false
+            var protection: Long? = null
             try {
-                if (args.command in listOf("start", "resume", "retry", "probe", "probe_update", "plan", "expand_reset", "export", "import", "delete_record", "ota_analyze", "ota_export", "ota_apply", "mobile_index")) startTask(args.command in listOf("delete_record", "export", "import", "ota_analyze", "ota_export", "mobile_index"))
+                if (args.command in listOf("start", "resume", "retry", "probe", "probe_update", "plan", "expand_reset", "package", "adb_connect", "export", "import", "delete_record", "ota_analyze", "ota_export", "ota_export_index", "ota_package", "ota_probe", "ota_apply", "ota_status", "ota_reboot", "mobile_index", "mobile_index_plan")) protection = startTask(args.command in listOf("package", "delete_record", "export", "import", "ota_analyze", "ota_export", "ota_export_index", "ota_package", "mobile_index", "mobile_index_plan"))
                 val runtime = MobileRuntime.get(activity)
                 val result = org.json.JSONTokener(runtime.callAttr("request", args.command, args.parameters).toString()).nextValue()
                 completed = true
                 if (result is JSONObject) listOf("path", "output").forEach { publishExport(result.optString(it)) }
                 resolve(invoke, result, "result")
-                if (!runtime.callAttr("busy").toBoolean()) stopTask()
             } catch (error: Exception) {
                 if (!completed) {
                     val parameters = runCatching { JSONObject(args.parameters) }.getOrDefault(JSONObject())
                     if (args.command == "export") exports.discard(parameters.optString("path"))
                     if (args.command in listOf("ota_export", "mobile_index")) exports.discard(parameters.optString("output"))
                 }
-                val running = try { MobileRuntime.get(activity).callAttr("busy").toBoolean() } catch (_: Exception) { false }
-                if (running) startTask() else stopTask()
                 invoke.reject(error.message ?: "Operation failed / 操作失败")
+            } finally {
+                protection?.let { TaskProtection.end(it) }
             }
         }
     }
@@ -198,8 +194,9 @@ class MobileHostPlugin(private val activity: Activity) : Plugin(activity) {
         if (state == null || result.resultCode != Activity.RESULT_OK || uri == null) { resolve(invoke, null);return }
         worker.execute {
             var upload: ImportWorkspace? = null
+            var protection: Long? = null
             try {
-                startTask(true)
+                protection = startTask(true)
                 val runtime = MobileRuntime.get(activity)
                 val (command, suggestion, kind) = state
                 if (command in listOf("pick_package_directory", "pick_index_directory")) {
@@ -237,11 +234,11 @@ class MobileHostPlugin(private val activity: Activity) : Plugin(activity) {
                 }
             } catch (error: Exception) { invoke.reject(error.message ?: "File operation failed / 文件操作失败") }
             finally {
-                if (!runCatching { upload?.cleanup() ?: true }.getOrDefault(false))
-                    emit(JSONObject().put("protocol", 1).put("type", "notice").put("data", JSONObject()
-                        .put("level", "warning").put("message", "Temporary upload could not be removed / 临时上传文件未能清理")).toString())
-                val running = try { MobileRuntime.get(activity).callAttr("busy").toBoolean() } catch (_: Exception) { false }
-                if (running) startTask() else stopTask()
+                try {
+                    if (!runCatching { upload?.cleanup() ?: true }.getOrDefault(false))
+                        emit(JSONObject().put("protocol", 1).put("type", "notice").put("data", JSONObject()
+                            .put("level", "warning").put("message", "Temporary upload could not be removed / 临时上传文件未能清理")).toString())
+                } finally { protection?.let { TaskProtection.end(it) } }
             }
         }
     }
