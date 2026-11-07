@@ -45,6 +45,50 @@ def boot_image(slot='a', kernel=b'kernel-before', family='e5', payload=0, extra=
 
 
 class BootTests(unittest.TestCase):
+    def test_e5_partition_request_survives_guard_and_repeated_updates_without_cmdline_help(self):
+        import boot
+        name = 'etc/e5/boot-request'
+        for slot in ('a', 'b'):
+            current = bytearray(boot_image(slot, extra={name: (b'e5.root=part\n', stat.S_IFREG|0o644)}))
+            current[44:1580] = b'e5.part_v=2 e5.root=part'.ljust(1536, b'\0')
+            current = bytes(current)
+            guarded = bind(current, current, 'e5')
+            self.assertEqual(boot.metadata(guarded, 'e5', lambda n:n == name)[name][0], b'e5.root=part\n')
+            sizes = []
+            for number in range(3):
+                incoming = boot_image('b' if slot == 'a' else 'a', kernel=b'new-kernel-'+str(number).encode())
+                result = bind(incoming, current, 'e5')
+                preserved = boot.metadata(result, 'e5', lambda n:n in (name, 'etc/e5/linux-slot'))
+                self.assertEqual(preserved[name][0], b'e5.root=part\n')
+                self.assertEqual(preserved['etc/e5/linux-slot'][0], slot.encode()+b'\n')
+                self.assertEqual(result[44:1580], current[44:1580])
+                self.assertEqual(result[64:1580].split(b'\0', 1)[0], b'part')
+                sizes.append(layout(result, 'e5')[1])
+                self.assertEqual(bind(result, result, 'e5'), result)
+                current = result
+            self.assertEqual(len(set(sizes)), 1)
+
+    def test_e5_without_request_does_not_gain_a_partition_override(self):
+        import boot
+        for family in ('e5', 'mu300'):
+            current = boot_image(family=family)
+            result = bind(boot_image(kernel=b'new-kernel', family=family), current, family)
+            self.assertNotIn('etc/e5/boot-request', boot.metadata(result, family, lambda n:n == 'etc/e5/boot-request'))
+            self.assertEqual(result[44:1580], current[44:1580])
+
+    def test_e5_one_shot_or_invalid_requests_are_rejected_before_writes(self):
+        name = 'etc/e5/boot-request'
+        for value, mode in ((b'e5.part_prepare=token:cid:plan\n', stat.S_IFREG|0o644),
+                            (b'\ne5.root=part\n', stat.S_IFREG|0o644),
+                            (b'e5.root=part;reboot\n', stat.S_IFREG|0o644),
+                            (b'e5.root=part\ne5.root=sd\n', stat.S_IFREG|0o644),
+                            (b'e5.root=part', stat.S_IFLNK|0o777)):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'not a persistent partition request'):
+                Binder(boot_image(extra={name: (value, mode)}), 'e5')
+        incoming = boot_image(extra={name: (b'e5.root=part\n', stat.S_IFREG|0o644)})
+        with self.assertRaisesRegex(ValueError, 'installation-specific request'):
+            bind(incoming, boot_image(), 'e5')
+
     def test_file_binding_matches_byte_api_without_loading_full_image(self):
         with tempfile.TemporaryDirectory() as directory:
             old = Path(directory)/'old'; new = Path(directory)/'new'
@@ -173,6 +217,30 @@ class FullUpdateTests(unittest.TestCase):
         (self.root/'dev/block/by-name/boot_a').write_bytes(boot_image('a'))
         (self.root/'dev/block/by-name/boot_b').write_bytes(b'ANDROID-DO-NOT-WRITE')
         self.engine = Engine(self.root)
+
+    def test_e5_partition_request_survives_real_transaction_and_rollback_in_both_slots(self):
+        import boot
+        import subprocess
+        request = 'etc/e5/boot-request'
+        for slot in ('a', 'b'):
+            with self.subTest(slot=slot):
+                linux = self.root/('dev/block/by-name/boot_'+slot)
+                android = self.root/('dev/block/by-name/boot_'+('b' if slot == 'a' else 'a'))
+                original = boot_image(slot, extra={request:(b'e5.root=part\n', stat.S_IFREG|0o644)})
+                linux.write_bytes(original); android.write_bytes(b'ANDROID-DO-NOT-WRITE')
+                (self.root/'etc/e5/linux-slot').write_text(slot+'\n')
+                (self.root/'usr/lib/test').write_bytes(b'old-file')
+                update = self.update([('usr/lib/test', b'new-file', None)], boot=True)
+                with Patch(update) as package:
+                    self.engine.apply(package)
+                self.assertEqual(boot.metadata(linux.read_bytes(), 'e5', lambda n:n == request)[request][0], b'e5.root=part\n')
+                self.assertEqual(android.read_bytes(), b'ANDROID-DO-NOT-WRITE')
+                result = subprocess.run([sys.executable, str(Path(boot.__file__).with_name('engine.py')),
+                                         'rollback', '--root', str(self.root)], capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+                self.assertEqual(linux.read_bytes(), original)
+                self.assertEqual(android.read_bytes(), b'ANDROID-DO-NOT-WRITE')
+                self.assertEqual((self.root/'usr/lib/test').read_bytes(), b'old-file')
 
     def update(self, updates, boot=False, base='e5-r1', target_version='e5-r2'):
         m = manifest(); m['operations'] = []; blobs = {}

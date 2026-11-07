@@ -264,7 +264,9 @@ def _native_storage(name):
     return name in NATIVE_STORAGE or name.startswith('repair/')
 
 
-def _role(name):
+def _role(name, family=None):
+    if family == 'e5' and name == 'etc/e5/boot-request':
+        return True
     return name in MU300_STORAGE or name.startswith('etc/misc-bc-') or name in (
         'etc/e5/android-slot', 'etc/e5/linux-slot', 'etc/e5/modem-slot',
         'etc/mu300/android-slot', 'etc/mu300/linux-slot', 'etc/linux-slot',
@@ -275,13 +277,21 @@ class Binder:
     """Bind device metadata/storage tools, skipping kernels and module payloads."""
     def __init__(self, current, family):
         self.current = current; self.family = family
-        self.fields = metadata(current, family, lambda n: n == 'init' or _role(n) or
+        self.fields = metadata(current, family, lambda n: n == 'init' or _role(n, family) or
                                (family == 'mu300' and _native_storage(n)))
         if 'init' not in self.fields: raise ValueError('Boot init missing')
         self.init = self.fields['init'][0].decode().replace('\r\n', '\n')
         self.needs_guard = ('# unisoc-ota-recovery-v2' not in self.init or
                             'mount --bind /dev "$ota_ram/target/dev"' not in self.init)
-        self.roles = {n:v for n,v in self.fields.items() if _role(n)}
+        self.roles = {n:v for n,v in self.fields.items() if _role(n, family)}
+        if family == 'e5' and 'etc/e5/boot-request' in self.roles:
+            request, mode = self.roles['etc/e5/boot-request']
+            # Preserve only the persistent installed-root selection. Replaying
+            # a one-shot part_prepare request could restart storage maintenance.
+            line = request.removesuffix(b'\n')
+            if not stat.S_ISREG(mode) or b'\n' in line or line.strip(b' \t') != b'e5.root=part':
+                raise ValueError('Installed E5 boot request is not a persistent partition request; no boot was written / '
+                                 '已安装的 E5 启动请求不是持久分区启动请求，未写入启动镜像')
         self.native = family == 'mu300' and '# U30PRO-MU300 storage bootstrap' in self.init
         if self.native:
             self.roles.update({n:v for n,v in self.fields.items() if _native_storage(n)})
@@ -304,8 +314,13 @@ class Binder:
             if not self.needs_guard: return None
             init = self.init
         else:
-            values = metadata(image, self.family, lambda n:n == 'init')
+            values = metadata(image, self.family, lambda n:n == 'init' or
+                              (self.family == 'e5' and n == 'etc/e5/boot-request'))
             if 'init' not in values: raise ValueError('Boot init missing')
+            if (self.family == 'e5' and 'etc/e5/boot-request' in values and
+                    'etc/e5/boot-request' not in self.roles):
+                raise ValueError('Incoming E5 boot contains an installation-specific request; no boot was written / '
+                                 '新版 E5 启动镜像含本机专属启动请求，未写入启动镜像')
             init = values['init'][0].decode().replace('\r\n', '\n')
         if self.native and '. /etc/mu300-desktop-storage.sh' in init:
             # Check before the OTA journal permits any boot/root writes. An
@@ -327,7 +342,7 @@ class Binder:
             init = init.replace(anchor, HOOK+'\n'+anchor)
         # The original guard already contains its storage tools. Appending
         # another complete copy would waste RAM and boot payload capacity.
-        roles = {n:v for n,v in self.roles.items() if not original or _role(n)}
+        roles = {n:v for n,v in self.roles.items() if not original or _role(n, self.family)}
         roles['init'] = (init.encode(), stat.S_IFREG|0o755)
         extra = overlay(roles)
         header = bytearray(image[:4096]); struct.pack_into('<I', header, 12, size+len(extra))
