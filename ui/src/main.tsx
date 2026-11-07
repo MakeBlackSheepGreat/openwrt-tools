@@ -185,12 +185,15 @@ function App() {
         } else if (notice.code === 'uninstall_journal_recovery') {
           toast.info(t.uninstallJournalRecovery, {id:'uninstall-journal', duration:12000});
           append(t.uninstallJournalRecovery);
-        } else if (notice.code === 'mtp_disabled') {
-          toast.info(t.mtpDisabled, {id:'usb-mtp', description:t.mtpDisabledDesc, duration:10000});
-          append(t.mtpDisabled);
-        } else if (notice.code === 'mtp_disable_failed') {
-          toast.warning(t.mtpDisableFailed, {id:'usb-mtp', description:t.mtpDisableFailedDesc, duration:12000});
-          append(t.mtpDisableFailed);
+        } else if (notice.code === 'usb_preparing') {
+          toast.loading(t.usbPreparing, {id:'usb-config', description:t.usbPreparingDesc, duration:Infinity});
+          append(t.usbPreparing);
+        } else if (notice.code === 'usb_ready') {
+          toast.success(t.usbReady, {id:'usb-config', description:t.usbReadyDesc, duration:5000});
+          append(t.usbReady);
+        } else if (notice.code === 'usb_prepare_failed') {
+          toast.error(t.usbPrepareFailed, {id:'usb-config', duration:12000});
+          append(t.usbPrepareFailed);
         }
       }
       else if (event.type === 'log') {

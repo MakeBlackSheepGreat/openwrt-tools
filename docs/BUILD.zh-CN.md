@@ -8,6 +8,16 @@ Linux/WSL 唯一工作区 /home/kano/openwrt-build。独立仓库通过 tools/bu
 
 ## 离线验证
 
+有线 Android ADB 的确认执行流程在设备身份和 root 检查后读取
+`sys.usb.config`，只移除其中的 `mtp`，保留现有 USB 网络、ADB 及其他功能；
+必要时补上 `adb`。例如 `ecm,mtp,adb` 变为 `ecm,adb`，不会强制改成 RNDIS。
+没有 MTP 时不写属性。仅修改当前组合，不写持久属性。
+切换后最多等待 120 秒，核对原序列号、同次启动身份、配置生效和 root，
+再开始备份／安装。Android 控制端同时丢弃旧 USB 句柄，按系统要求重新授权。
+无线 ADB、设备枚举和查看计划不改变 USB 配置；续接进行中的离线写入或
+已启动的在线缩容时跳过此步骤，避免干扰维护进程。
+旧 `windows_mtp.py` 仅保留为空兼容入口，不再禁用 Windows 的 MTP 设备节点。
+
 ```powershell
 $env:OPENWRT_E5_SOURCE='D:/Git/e5-linux'
 $env:OPENWRT_MU300_SOURCE='D:/Git/mu300-linux-clean-tf-7.2'

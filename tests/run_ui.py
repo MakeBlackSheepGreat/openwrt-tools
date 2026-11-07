@@ -9,7 +9,7 @@ import time
 from urllib.request import urlopen
 
 ROOT=Path(__file__).resolve().parents[1]
-CHECKS=('ui_smoke','help_smoke','refresh_smoke','method_smoke','ordering_smoke','diagnostics_smoke','device_reboot_smoke','update_smoke','support_smoke','wireless_smoke','uninstall_smoke','mtp_smoke','online_shrink_smoke','model_compat_smoke','android_ui_smoke','android_dialog_smoke','ota_browser')
+CHECKS=('ui_smoke','help_smoke','refresh_smoke','method_smoke','ordering_smoke','diagnostics_smoke','device_reboot_smoke','update_smoke','support_smoke','wireless_smoke','uninstall_smoke','usb_config_smoke','online_shrink_smoke','model_compat_smoke','android_ui_smoke','android_dialog_smoke','ota_browser')
 
 
 def main():

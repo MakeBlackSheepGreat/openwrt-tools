@@ -50,6 +50,20 @@ class ReadOnlyAdb:
 
 
 class MethodRouting(unittest.TestCase):
+    def test_usb_preparation_runs_only_for_confirmed_rooted_tasks_in_both_families(self):
+        for kind in ('e5', 'mu300'):
+            for method in ('part', 'reinstall', 'image', 'boot', 'uninstall', 'expand'):
+                with self.subTest(kind=kind, method=method):
+                    a = self.adapter(kind)
+                    a.usb_prepared = set()
+                    # Expansion inspects free-space geometry, unrelated to USB.
+                    with patch('backend.expand_space.inspect_space', return_value=(None, {})), patch('backend.usb_config.prepare') as prepare:
+                        device = a.probe(SERIAL, method)
+                        prepare.assert_not_called()
+                        a.ctx = SimpleNamespace(record={'device': device, 'stage': 'backup'}, boundary=Mock())
+                        a.probe(SERIAL, method)
+                        prepare.assert_called_once_with(a.adb, 'boot-fixture', notify=None, boundary=a.ctx.boundary)
+
     def test_e5_probe_keeps_both_android_and_linux_roles(self):
         for slot in ('_a','_b'):
             a=self.adapter()

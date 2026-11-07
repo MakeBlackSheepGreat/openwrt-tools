@@ -8,7 +8,7 @@
 2. E5 和 MU300 都支持 eMMC/UFS。E5 使用原始 READ-DESCRIPTOR 身份，MU300 保持 sysfs 描述符派生身份；不重算现有记录身份。共享 Python 存储层选择对应库；两套脚本均包含于桌面与 APK，不能因构建位置误选 E5。
 3. MU300 升级 misc 支持 mmcblk 与 sdX UFS 分区，保留整盘 UFS/loop 根设备读取；E5 保留动态 Android/Linux A/B、畅行60 dtbo/vendor_boot 备份与源工具准备。
 4. MU300 原有 hidden-area/container、SD、内置分区、userdata-image 升级；E5 的 TF/ext4 与两阶段分区流程继续由包内入口执行。临时启动继续仅操作 misc，不为识别安装而挂载系统根。
-5. Windows 仅 MU300 有线 ADB 使用 MTP 规避；Android/无线 ADB 与 E5 不套用此措施。
+5. 合并时 Windows 仅 MU300 有线 ADB 使用 MTP 规避。2026-11-07 已替换为公共有线 ADB 准备：确认执行后读取当前 USB 组合，仅移除 MTP 并等待原设备重连；桌面和 Android 共用，E5/MU300 都适用，保持无线 ADB 和枚举只读，不再禁用 Windows 设备节点。
 
 ## 本次补齐的公共缺口
 

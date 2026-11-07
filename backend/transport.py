@@ -13,7 +13,6 @@ import time
 from .state import sha
 from .diagnostics import traced
 from .binary_io import pull_binary
-from .windows_mtp import prepare_devices
 from . import host
 
 
@@ -108,9 +107,6 @@ class Adb:
                 result.append({'serial': values[0], 'state': values[1],
                                'wireless': wireless_serial(values[0]),
                                'label': next((v[6:] for v in values[2:] if v.startswith('model:')), values[0][-4:])})
-        # Listing and wireless connection management stay read-only.
-        if getattr(self, 'mtp_workaround', False):
-            prepare_devices([d for d in result if d['serial'] == self.serial], getattr(self, 'notice', None))
         return result
 
     def connect(self, address):

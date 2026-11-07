@@ -114,6 +114,10 @@ class Registry:
 class Driver:
     def __init__(self,registry,serial):self.registry=registry;self.serial=serial
 
+    def reset_connection(self):
+        """Discard only this selected USB client's handle after re-enumeration."""
+        self.registry.close(self.serial)
+
     def pull(self,remote,local,progress=None,timeout=45):
         with self.registry.lock(self.serial):
             client=self.registry.client(self.serial)

@@ -74,6 +74,19 @@ class AndroidHostTests(unittest.TestCase):
     def registry(self,temp,client=None):
         r=Registry(Mock(),temp);r.clients['usb:test']=client or Mock();return r
 
+    def test_usb_reenumeration_discards_only_selected_client(self):
+        with tempfile.TemporaryDirectory() as temp:
+            selected, other = Mock(), Mock()
+            registry = self.registry(temp, selected)
+            registry.clients['usb:other'] = other
+            registry.state.update({'usb:test': 'device', 'usb:other': 'device'})
+            Driver(registry, 'usb:test').reset_connection()
+            selected.close.assert_called_once_with()
+            other.close.assert_not_called()
+            self.assertNotIn('usb:test', registry.clients)
+            self.assertNotIn('usb:test', registry.state)
+            self.assertIs(registry.clients['usb:other'], other)
+
     def test_shell_keeps_payload_bytes_and_remote_nonzero_exit(self):
         for code in (0,7):
             with self.subTest(code=code),tempfile.TemporaryDirectory() as temp:

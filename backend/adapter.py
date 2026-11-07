@@ -107,6 +107,7 @@ class Adapter:
         self.adb = None
         self.password = ''
         self.expected_ssh_key = None
+        self.usb_prepared = set()
         if host.current() is not None:
             host.current().bind_legacy(self)
         if self.ctx:
@@ -299,7 +300,6 @@ class Adapter:
         self.adb = Adb(self.root, serial)
         self.adb.context = self.ctx
         self.adb.notice = getattr(self, 'notice', None)
-        self.adb.mtp_workaround = self.kind == 'mu300'
         if self.kind == 'e5':
             self.legacy.ADB = self.adb.exe
             self.legacy.SERIAL = serial
@@ -405,7 +405,27 @@ class Adapter:
             storage['TF'] = target
         if self.ctx:
             require_approval(self.ctx.record, device)
+            self.prepare_transport(device)
         return device
+
+    def prepare_transport(self, device):
+        """Run after confirmed identity/root checks, before backups or writes."""
+        record = self.ctx.record
+        key = (device['serial'], device.get('boot_id'))
+        if key in self.usb_prepared or record.get('unsafe'):
+            return
+        # Never interrupt a detached maintenance writer or a post-write boot
+        # verification merely to change USB functions on a resumed operation.
+        if record.get('stage') in ('openwrt_boot', 'verify_capacity', 'uninstall_offline', 'expand_offline', 'verify_android'):
+            return
+        if record.get('online_shrink', {}).get('state') in ('started', 'gpt-committed'):
+            return
+        expected = record['device']
+        if any(device.get(k) != expected.get(k) for k in ('cid', 'profile', 'slot')):
+            raise RecoveryRequired('Device identity changed before USB preparation / USB 准备前设备身份发生变化，请重新检查')
+        from .usb_config import prepare
+        prepare(self.adb, device.get('boot_id'), notify=getattr(self, 'notice', None), boundary=self.ctx.boundary)
+        self.usb_prepared.add(key)
 
     def read_gpt(self, storage):
         disk = '/dev/block/' + storage_io.disk_node(storage['NODE'])
