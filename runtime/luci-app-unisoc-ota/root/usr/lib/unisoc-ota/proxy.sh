@@ -1,4 +1,11 @@
 #!/bin/sh
+# rpcd obtains this fixed signature while registering plugins. Do not start
+# Python or import the engine just to enumerate methods during a live update.
+# Keep this in sync with rpc.py METHODS (checked by test_ota_rpc.py).
+if [ "$#" -eq 1 ] && [ "$1" = list ]; then
+    printf '%s\n' '{"status":{},"inspect":{},"start":{"id":""},"rollback_check":{},"rollback":{},"discard_recovery":{},"reboot":{}}'
+    exit 0
+fi
 # During a transaction, RPC uses the isolated interpreter, never half-updated
 # live Python libraries. The persistent pointer is ignored after RAM is gone.
 r=$(cat /etc/unisoc-ota/active-runtime 2>/dev/null)

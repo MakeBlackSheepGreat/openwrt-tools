@@ -63,7 +63,7 @@ return view.extend({
         M.injectCss(); M.localizeMenu();
         var messages=loaded[0], state=loaded[1], lang=M.uiLanguage();
         var zh=lang==='zh', tr=function(a,b,c){return zh?a:lang==='tr'?(c||b):b;};
-        var error=function(r){if(r&&r.error)throw new Error(r.error);return r;};
+        var error=function(r){if(r&&r.error){var e=new Error(r.error);e.otaBackend=true;throw e;}return r;};
         var detail=E('div',{class:'mud-ota-activity',role:'status','aria-live':'polite'});
         var version=E('code'), badge=E('span',{class:'mud-ota-status'});
         var size=E('strong',{},'--'), recoveryNote=E('p',{class:'mud-note'});
@@ -72,7 +72,8 @@ return view.extend({
         var rollback=action(tr('撤销上次补丁','Roll back last patch','Son yamayı geri al'),'recovery');
         var discard=action(tr('删除恢复副本','Delete recovery copy','Kurtarma kopyasını sil'),'trash','warn');
         var reboot=action(tr('重启设备','Reboot','Yeniden başlat'),'power');
-        var busy=false, watching=false, pollError=false, rebooting=false, disposed=false, pollTick, last=state, localPhase=null, pendingAction=null;
+        var busy=false, watching=false, pollError=false, rebooting=false, disposed=false, pollTick, last=state, localPhase=null, pendingAction=null, pendingError=null;
+        var initialRetries=state.load_error?15:0;
         var workingTitle=E('strong'), workingDetail=E('p',{class:'mud-note'});
         var overlay=E('div',{class:'mud-ota-overlay',hidden:true,role:'status','aria-live':'polite'},[
             E('div',{class:'mud-card'},[E('span',{class:'mud-ota-spinner','aria-hidden':'true'}),workingTitle,workingDetail])]);
@@ -134,25 +135,62 @@ return view.extend({
         }
         function stopWatch(){if(pollTick)poll.remove(pollTick);watching=false;}
         this.stopWatch=function(){disposed=true;overlay.hidden=true;stopWatch();};
+        function interrupted(e){
+            // rpcd reload removes and re-registers executable plugins after
+            // committed updates. This is not a filesystem transaction failure.
+            // Keep this scoped to this object's transport, not arbitrary engine
+            // errors, missing methods or denied ACLs.
+            if(e&&e.otaBackend)return false;
+            return messages.isConnectionError(e)||/RPC call to unisoc-ota\/(?:status|start|rollback|discard_recovery)\b[^\n]*Object not found/i.test(String(e&&e.message||e||''));
+        }
+        function receive(r){
+            if(disposed||rebooting)return;
+            error(r);
+            initialRetries=0;
+            if(pendingError){
+                var job=r.job||{}, transaction=r.transaction||{};
+                var id=job.patch_id||(job.result||{}).id||transaction.id;
+                var accepted=pendingAction&&job.command===pendingAction.command&&id===pendingAction.id&&
+                    (job.status==='running'||job.status==='complete'||job.status==='failed');
+                var e=pendingError;pendingError=null;
+                if(!accepted)failed(e);
+            }
+            show(r);
+        }
+        function loadFailed(e){
+            initialRetries=0;localPhase=null;busy=false;overlay.hidden=true;stopWatch();
+            badge.setAttribute('data-state','pending');
+            badge.textContent=tr('状态暂不可用','Status unavailable','Durum kullanılamıyor');
+            detail.textContent=tr('无法读取系统补丁状态，请重新打开此页面重试。','Cannot read system patch status. Reopen this page to retry.','Sistem yaması durumu okunamıyor. Yeniden denemek için sayfayı tekrar açın.');
+            failed(e);
+        }
         function watch(){
             if(watching||disposed||rebooting)return;watching=true;
-            pollTick=function(){if(disposed||rebooting)return;return callStatus().then(function(r){show(r);pollError=false;if(!busy)stopWatch();}).catch(function(e){if(disposed||rebooting)return;if(messages.isConnectionError(e)&&busy)phase('reconnecting');else if(!pollError)failed(e);pollError=true;});};
+            pollTick=function(){
+                if(disposed||rebooting)return;
+                return callStatus().then(function(r){receive(r);pollError=false;if(!busy)stopWatch();}).catch(function(e){
+                    if(disposed||rebooting)return;
+                    if(initialRetries){
+                        if(interrupted(e)&&--initialRetries){phase('reconnecting');return;}
+                        loadFailed(e);return;
+                    }
+                    if(interrupted(e)&&busy){phase('reconnecting');return;}
+                    if(!pollError)failed(e);
+                    pollError=true;
+                });
+            };
             poll.add(pollTick,2);
         }
-        function refresh(){return callStatus().then(show).catch(function(e){failed(e);watch();});}
+        function refresh(){return callStatus().then(receive).catch(function(e){if(disposed||rebooting)return;if(interrupted(e)&&busy)phase('reconnecting');else failed(e);watch();});}
         function operationFailed(e){
             if(disposed)return Promise.resolve();
             localPhase=null;
-            if(messages.isConnectionError(e)&&pendingAction){
+            if(interrupted(e)&&pendingAction){
+                pendingError=e;
                 phase('reconnecting');
                 return callStatus().then(function(r){
-                    error(r);var job=r.job||{}, transaction=r.transaction||{};
-                    var id=job.patch_id||(job.result||{}).id||transaction.id;
-                    var accepted=job.command===pendingAction.command&&id===pendingAction.id&&
-                        (job.status==='running'||job.status==='complete');
-                    localPhase=null;show(r);if(accepted){if(busy)watch();return;}
-                    failed(e);
-                }).catch(function(){failed(e);watch();});
+                    receive(r);if(busy)watch();
+                }).catch(function(statusError){if(disposed||rebooting)return;if(!interrupted(statusError)){pendingError=null;failed(statusError);}watch();});
             }
             phase(null);failed(e);return refresh();
         }
@@ -211,7 +249,7 @@ return view.extend({
                 if(messages.isConnectionError(e))ui.awaitReconnect();else{rebooting=false;busy=false;return operationFailed(e);}
             });
         };
-        if(state.load_error)failed(state.load_error);else show(state);
+        if(state.load_error){if(interrupted(state.load_error)){phase('reconnecting');watch();}else{initialRetries=0;failed(state.load_error);}}else show(state);
         return E('div',{class:'mud mud-ota'},[E('style',{},CSS),overlay,
             E('header',{class:'mud-ota-heading'},[E('span',{class:'mud-ota-kicker'},tr('系统维护','SYSTEM MAINTENANCE','SİSTEM BAKIMI')),E('h2',{},tr('系统补丁','System patches','Sistem yamaları')),E('p',{class:'mud-note'},tr('只更新变化的系统文件，保留你的插件、配置和数据。','Update changed system files while keeping your plugins, settings and data.','Eklentileri, ayarları ve verileri koruyarak değişen sistem dosyalarını güncelleyin.'))]),
             E('section',{class:'mud-card mud-ota-hero'},[E('div',{class:'mud-ota-version'},[badge,version]),reboot]),

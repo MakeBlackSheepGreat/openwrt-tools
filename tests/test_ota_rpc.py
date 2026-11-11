@@ -115,7 +115,7 @@ class RPCTests(unittest.TestCase):
             root = Path(d); service=root/'etc/init.d/rpcd'; service.parent.mkdir(parents=True); service.touch()
             self.rpc.ROOT = d
             result = Mock(returncode=0, stdout=json.dumps({'identity':{'version':'test'}}), stderr='')
-            with patch.dict(os.environ, {'UNISOC_OTA_RAM':'/'}), patch.object(self.rpc,'mounted',return_value=True), patch.object(self.rpc.subprocess,'run',return_value=result) as run:
+            with patch.dict(os.environ, {'UNISOC_OTA_RAM':'/'}), patch.object(self.rpc,'mounted',return_value=True), patch.object(self.rpc,'rpc_object_id',side_effect=['old','new','new']), patch.object(self.rpc.subprocess,'run',return_value=result) as run:
                 self.assertEqual(self.rpc.activate_rpc(), {'status':'ready'})
                 self.assertEqual(run.call_args_list[0].args[0], ['/ota/busybox','chroot',d,'/etc/init.d/rpcd','reload'])
                 self.assertEqual(run.call_args_list[1].args[0][-1], 'ubus call unisoc-ota status')
@@ -124,7 +124,7 @@ class RPCTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); service=root/'etc/init.d/rpcd'; service.parent.mkdir(parents=True); service.touch(); self.rpc.ROOT=d
             missing=Mock(returncode=1); ok=Mock(returncode=0,stdout='{"identity":{}}',stderr='')
-            with patch.dict(os.environ, {'UNISOC_OTA_RAM':'/'}), patch.object(self.rpc,'mounted',return_value=False), patch.object(self.rpc.subprocess,'run',side_effect=[ok,ok,ok,ok]) as run:
+            with patch.dict(os.environ, {'UNISOC_OTA_RAM':'/'}), patch.object(self.rpc,'mounted',return_value=False), patch.object(self.rpc,'rpc_object_id',side_effect=['old','new','new']), patch.object(self.rpc.subprocess,'run',side_effect=[ok,ok,ok,ok]) as run:
                 self.assertEqual(self.rpc.activate_rpc(), {'status':'ready'})
                 self.assertEqual(run.call_args_list[0].args[0], ['/ota/busybox','mount','--bind','/proc/1/root/tmp',d+'/tmp'])
                 self.assertEqual(run.call_args_list[1].args[0], ['/ota/busybox','mount','--bind','/proc/1/root/proc',d+'/proc'])
@@ -144,8 +144,51 @@ class RPCTests(unittest.TestCase):
     def test_reload_failure_is_warning_not_filesystem_failure(self):
         with tempfile.TemporaryDirectory() as d:
             service=Path(d)/'etc/init.d/rpcd'; service.parent.mkdir(parents=True); service.touch(); self.rpc.ROOT=d
-            with patch.object(self.rpc.subprocess,'run',return_value=Mock(returncode=1,stdout='',stderr='reload failed')):
+            with patch.object(self.rpc,'rpc_object_id',return_value='old'), patch.object(self.rpc.subprocess,'run',return_value=Mock(returncode=1,stdout='',stderr='reload failed')):
                 self.assertEqual(self.rpc.activate_rpc()['status'], 'warning')
+
+    def test_fixed_signature_does_not_need_python_or_live_runtime(self):
+        import subprocess
+        proxy=Path(self.rpc.__file__).with_name('proxy.sh')
+        with tempfile.TemporaryDirectory() as empty:
+            result=subprocess.run(['/bin/sh',str(proxy),'list'],env={'PATH':empty},
+                                  capture_output=True,text=True,timeout=3,check=True)
+            self.assertEqual(json.loads(result.stdout),self.rpc.METHODS)
+            self.assertEqual(result.stderr,'')
+            extra=subprocess.run(['/bin/sh',str(proxy),'list','unexpected'],env={'PATH':empty},
+                                 capture_output=True,text=True,timeout=3)
+            self.assertNotEqual(extra.returncode,0,'Malformed invocation obtained a valid registration signature')
+
+    def test_old_object_cannot_pass_post_reload_activation(self):
+        with tempfile.TemporaryDirectory() as d:
+            service=Path(d)/'etc/init.d/rpcd';service.parent.mkdir(parents=True);service.touch();self.rpc.ROOT=d
+            ok=Mock(returncode=0,stdout='{"identity":{"version":"new"}}',stderr='')
+            with patch.object(self.rpc,'rpc_object_id',side_effect=['old','old',None,'new','new']) as generation, \
+                 patch.object(self.rpc.subprocess,'run',return_value=ok) as run, \
+                 patch.object(self.rpc.time,'monotonic',side_effect=[0,0.1,0.2]), \
+                 patch.object(self.rpc.time,'sleep'):
+                self.assertEqual(self.rpc.activate_rpc(),{'status':'ready'})
+            self.assertEqual(generation.call_count,5)
+            self.assertEqual(len(run.call_args_list),2,'Health check ran against the old registration')
+
+    def test_another_reload_during_health_check_is_not_ready(self):
+        with tempfile.TemporaryDirectory() as d:
+            service=Path(d)/'etc/init.d/rpcd';service.parent.mkdir(parents=True);service.touch();self.rpc.ROOT=d
+            ok=Mock(returncode=0,stdout='{"identity":{}}',stderr='')
+            with patch.object(self.rpc,'rpc_object_id',side_effect=['old','new','changed',None]), \
+                 patch.object(self.rpc.subprocess,'run',return_value=ok), \
+                 patch.object(self.rpc.time,'monotonic',side_effect=[0,1,6]), \
+                 patch.object(self.rpc.time,'sleep'):
+                self.assertEqual(self.rpc.activate_rpc()['status'],'warning')
+
+    def test_object_lookup_requires_the_exact_name_and_success(self):
+        for output,code,expected in [("'unisoc-ota' @Ab12\n",0,'ab12'),
+                                     ("'other-ota' @ab12\n",0,None),
+                                     ("'unisoc-ota' @ab12\n",1,None),('',0,None)]:
+            with self.subTest(output=output,code=code), patch.object(self.rpc.subprocess,'run',return_value=Mock(returncode=code,stdout=output)):
+                self.assertEqual(self.rpc.rpc_object_id([]),expected)
+        with patch.object(self.rpc.subprocess,'run',side_effect=self.rpc.subprocess.TimeoutExpired('ubus',3)):
+            self.assertIsNone(self.rpc.rpc_object_id([]))
 
     def test_worker_publishes_complete_after_activation(self):
         events=[]

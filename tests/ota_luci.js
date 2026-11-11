@@ -2,7 +2,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const source = fs.readFileSync(path.join(__dirname, '../../openwrt/luci-app-unisoc-ota/htdocs/luci-static/resources/view/system/unisoc-ota.js'), 'utf8');
+const resources = path.join(__dirname, '../runtime/luci-app-unisoc-ota/htdocs/luci-static/resources');
+const source = fs.readFileSync(path.join(resources, 'view/system/unisoc-ota.js'), 'utf8');
 let messages;
 const idle = () => ({identity:{version:'test-r2'},transaction:{id:'a'.repeat(64),status:'complete'},recovery:{available:true,bytes:1048576,count:1},job:{status:'complete',result:{}}});
 function fixture(write=true, initial=idle(), locale="en") {
@@ -11,7 +12,7 @@ function fixture(write=true, initial=idle(), locale="en") {
     const rpc={declare:options=>{state.declarations.push(options);const {method}=options;return (...args)=>{
         state.calls.push(method);
         state.arguments.push([method,args]);
-        if(method==='status')return state.rejectStatus?Promise.reject(Error('offline')):Promise.resolve(state.status);
+        if(method==='status')return state.statusError?Promise.reject(Error(state.statusError)):state.rejectStatus?Promise.reject(Error('offline')):Promise.resolve(state.status);
         if(method==='inspect'&&state.rejectInspect)return Promise.reject(Error(state.rejectInspect));
         if(method==='inspect')return state.inspectPromise||Promise.resolve(state.inspection||{id:'a'.repeat(64),applicable:true,manifest:{base_version:'r1',target_version:'r2',operations:[]}});
         if(method==='start'&&state.rejectStart)return Promise.reject(Error('start rejected'));
@@ -36,7 +37,7 @@ function fixture(write=true, initial=idle(), locale="en") {
     return state;
 }
 async function main(){
-    const shared=fs.readFileSync(path.join(__dirname,'../../openwrt/luci-app-unisoc-ota/htdocs/luci-static/resources/unisoc-ota/errors.js'));
+    const shared=fs.readFileSync(path.join(resources,'unisoc-ota/errors.js'));
     messages=await import('data:text/javascript;base64,'+shared.toString('base64'));
     assert.match(messages.explainError('RuntimeError: {"error":"Device/base mismatch: version; device=r1; patch base=r2; patch target=r3"}').message,/设备当前为 r1/);
     assert.match(messages.explainError('Rollback conflict: usr/lib/unisoc-ota/rpc.py; changed=sha256,mode').message,/内容、权限/);
@@ -98,6 +99,51 @@ async function main(){
     p.rejectStatus=false;
     for(const tick of [...p.ticks])await tick();
     assert(!p.button('Import patch').disabled,'Polling never recovered');
+    const missing='RPC call to unisoc-ota/status failed with error -32000: Object not found';
+    const initialMissing=fixture(true,{load_error:Error(missing)});
+    assert.equal(initialMissing.notifications.length,0,'Page opened during registration immediately reported a permanent failure');
+    assert(initialMissing.ticks.size);assert(initialMissing.button('Import patch').disabled);
+    initialMissing.status={...idle(),reboot_required:true};
+    for(const tick of [...initialMissing.ticks])await tick();
+    assert(initialMissing.text().includes('Reboot to use'));assert(!initialMissing.button('Reboot').disabled);
+    assert.equal(initialMissing.ticks.size,0);assert.equal(initialMissing.notifications.length,0);
+    const absent=fixture(true,{load_error:Error(missing)});absent.statusError=missing;
+    for(let i=0;i<15;i++)for(const tick of [...absent.ticks])await tick();
+    assert.equal(absent.notifications.length,1,'A persistently missing plugin was silently hidden');
+    assert.equal(absent.ticks.size,0);assert(absent.overlay().hidden,'Initial retry loop never released the overlay');
+    const initialDenied=fixture(true,{load_error:Error('RPC call to unisoc-ota/status failed: Permission denied')});
+    assert.equal(initialDenied.notifications.length,1);assert.equal(initialDenied.ticks.size,0);
+    const registering=fixture();
+    await registering.button('Import patch').onclick();await registering.button('Apply patch').click();
+    registering.statusError=missing;
+    for(let i=0;i<3;i++)for(const tick of [...registering.ticks])await tick();
+    assert.equal(registering.notifications.length,0,'rpcd registration gap misreported a committed update as failed');
+    assert(registering.button('Import patch').disabled,'Unconfirmed update unlocked writes');
+    assert(registering.text().includes('Checking update status'));
+    registering.statusError=null;
+    registering.status={...idle(),reboot_required:true,job:{status:'complete',command:'apply',result:{id:'a'.repeat(64)}}};
+    for(const tick of [...registering.ticks])await tick();
+    assert(registering.text().includes('Reboot to use'));assert(registering.overlay().hidden);
+    assert.equal(registering.notifications.length,0);assert.equal(registering.ticks.size,0);
+    assert.equal(registering.calls.filter(x=>x==='start').length,1,'RPC reconnection reapplied the patch');
+    const denied=fixture();
+    await denied.button('Import patch').onclick();await denied.button('Apply patch').click();
+    denied.statusError=missing;for(const tick of [...denied.ticks])await tick();
+    denied.statusError='RPC call to unisoc-ota/status failed: Permission denied';
+    for(const tick of [...denied.ticks])await tick();
+    assert.equal(denied.notifications.length,1,'Prior interruption suppressed a real permission error');
+    const backendError=fixture();
+    await backendError.button('Import patch').onclick();await backendError.button('Apply patch').click();
+    backendError.status={error:'offline recovery metadata is invalid'};
+    for(const tick of [...backendError.ticks])await tick();
+    assert.equal(backendError.notifications.length,1,'Backend error text was confused with a transport outage');
+    const failedWrite=fixture();
+    await failedWrite.button('Import patch').onclick();await failedWrite.button('Apply patch').click();
+    failedWrite.statusError=missing;for(const tick of [...failedWrite.ticks])await tick();
+    failedWrite.statusError=null;failedWrite.status={...idle(),job:{status:'failed',command:'apply',patch_id:'a'.repeat(64),result:{error:'Input/output error'}}};
+    for(const tick of [...failedWrite.ticks])await tick();
+    assert(JSON.stringify(failedWrite.root).includes('Device storage cannot be written'),'Actual write failure was hidden');
+    assert(!failedWrite.button('Import patch').disabled);
     const c=fixture();c.rollbackCheck={available:false,reason:'conflict',conflicts:[{path:'usr/lib/unisoc-ota/rpc.py',fields:['mode']}]};
     await c.button('Roll back last patch').onclick();
     assert(!c.calls.includes('rollback'),'Conflicting rollback started writes');
@@ -141,6 +187,16 @@ async function main(){
         assert.equal(lost.notifications.length,0,'Confirmed '+status+' job was misreported as failed');
         assert.equal(lost.overlay().hidden,status==='complete');
         assert.equal(lost.calls.filter(x=>x==='start').length,1,'Lost acknowledgement retried the update');
+    }
+    for(const matching of [true,false]){
+        const lost=fixture();lost.startError='XHR request timed out';lost.statusError=missing;
+        await lost.button('Import patch').onclick();await lost.button('Apply patch').click();
+        assert.equal(lost.notifications.length,0,'Lost acknowledgement plus RPC reload was reported as a failed update');
+        assert(lost.button('Import patch').disabled);
+        lost.statusError=null;lost.status={...idle(),reboot_required:true,job:{status:'complete',command:'apply',result:{id:(matching?'a':'b').repeat(64)}}};
+        for(const tick of [...lost.ticks])await tick();
+        assert.equal(lost.notifications.length,matching?0:1,'Reconnection lost the requested patch identity');
+        assert.equal(lost.calls.filter(x=>x==='start').length,1);
     }
     const unrelated=fixture();unrelated.startError='XHR request timed out';unrelated.status={...idle(),job:{status:'complete',command:'apply',result:{id:'b'.repeat(64)}},transaction:{id:'b'.repeat(64),status:'complete'}};
     await unrelated.button('Import patch').onclick();await unrelated.button('Apply patch').click();assert.equal(unrelated.notifications.length,1,'Unrelated old completion hid a rejected update');

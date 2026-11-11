@@ -40,8 +40,18 @@ def mounted(path, table='/proc/self/mountinfo'):
     return False
 
 
+def rpc_object_id(prefix):
+    try:
+        result = subprocess.run(prefix+['ubus', '-v', 'list', 'unisoc-ota'],
+                                capture_output=True, text=True, timeout=3)
+    except subprocess.TimeoutExpired:
+        return None
+    match = re.search(r"^'unisoc-ota' @([0-9a-fA-F]+)\s*$", result.stdout, re.M)
+    return match[1].lower() if not result.returncode and match else None
+
+
 def activate_rpc():
-    """Register newly installed plugins without restarting rpcd or its sessions."""
+    """Reload executable plugins through rpcd's session-preserving SIGHUP."""
     root = Path(ROOT or '/')
     if not (root/'etc/init.d/rpcd').is_file():
         return {'status': 'deferred', 'error': 'rpcd service is unavailable'}
@@ -59,16 +69,25 @@ def activate_rpc():
                     subprocess.run(['/ota/busybox', 'mount', '--bind',
                                     '/proc/1/root/'+name, destination], check=True,
                                    capture_output=True, text=True, timeout=5)
+        before = rpc_object_id(prefix)
         reload = subprocess.run(prefix+['/etc/init.d/rpcd', 'reload'], capture_output=True, text=True, timeout=15)
         if reload.returncode:
             raise ValueError((reload.stderr or reload.stdout)[-1000:])
         deadline = time.monotonic()+5
         while True:
-            probe = subprocess.run(prefix+['/bin/sh', '-c', 'ubus call unisoc-ota status'], capture_output=True, text=True, timeout=3)
-            if not probe.returncode:
-                data = json.loads(probe.stdout)
-                if 'identity' in data and not data.get('error'):
-                    return {'status': 'ready'}
+            # procd acknowledges the signal asynchronously. An immediate
+            # successful call can still come from the old, soon-to-disappear
+            # object; require the replacement registration before health-checking.
+            current = rpc_object_id(prefix)
+            if current and current != before:
+                try:
+                    probe = subprocess.run(prefix+['/bin/sh', '-c', 'ubus call unisoc-ota status'], capture_output=True, text=True, timeout=3)
+                except subprocess.TimeoutExpired:
+                    probe = None
+                if probe is not None and not probe.returncode:
+                    data = json.loads(probe.stdout)
+                    if 'identity' in data and not data.get('error') and rpc_object_id(prefix) == current:
+                        return {'status': 'ready'}
             if time.monotonic() >= deadline:
                 raise ValueError('unisoc-ota RPC did not register after reload')
             time.sleep(.1)

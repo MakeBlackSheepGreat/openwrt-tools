@@ -30,5 +30,7 @@ jobs:
       - name: Linux offline regression (ownership and temporary filesystem fixtures)
         if: runner.os == 'Linux'
         run: sudo -E "$(which python)" -X utf8 -m unittest discover -s tests -v
+      - name: LuCI OTA registration and reconnect regression
+        run: node tests/ota_luci.js
       - run: npm --prefix ui ci --no-audit --no-fund
       - run: npm --prefix ui run build
