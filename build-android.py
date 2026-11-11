@@ -54,7 +54,8 @@ def main():
         if not args.keystore or not args.keystore.is_file():raise ValueError('Release builds require a persistent Android signing key')
         if not all(passwords.get(k) or os.environ.get(k) for k in ('OPENWRT_ANDROID_STORE_PASSWORD','OPENWRT_ANDROID_KEY_PASSWORD')):
             raise ValueError('Android signing password environment is missing')
-    for path in (args.sdk,args.sdk/'ndk'/args.ndk,args.jdk/'bin/java.exe',args.build_python):
+    windows=os.name=='nt'
+    for path in (args.sdk,args.sdk/'ndk'/args.ndk,args.jdk/'bin'/('java.exe' if windows else 'java'),args.build_python):
         if not path.exists():raise ValueError('Missing registered Android build input: '+str(path))
     version=subprocess.check_output([str(args.build_python),'-c','import sys;print("%d.%d"%sys.version_info[:2])'],text=True).strip()
     if version!='3.13':raise ValueError('Android wheels require matching build Python 3.13')
@@ -66,13 +67,13 @@ def main():
     env['OPENWRT_BUILD_NODE']=node
     env['OPENWRT_TAURI_CLI']=str(HERE/'ui/node_modules/@tauri-apps/cli/tauri.js')
     env['PATH']=str(args.jdk/'bin')+os.pathsep+env['PATH']
-    cli=HERE/'ui/node_modules/.bin/tauri.cmd'
+    cli=HERE/'ui/node_modules/.bin'/('tauri.cmd' if windows else 'tauri')
     if not cli.is_file():raise ValueError('Install the existing UI lockfile dependencies first')
     dependency=json.loads((MOBILE/'vendor/adb-shell.json').read_text())
     wheel=MOBILE/'vendor'/dependency['wheel']
     if hashlib.sha256(wheel.read_bytes()).hexdigest()!=dependency['wheel_sha256']:
         raise ValueError('Embedded ADB dependency checksum differs')
-    if not (MOBILE/'src-tauri/gen/android/gradlew.bat').is_file():raise ValueError('Android project is missing; restore tracked mobile sources')
+    if not (MOBILE/'src-tauri/gen/android'/('gradlew.bat' if windows else 'gradlew')).is_file():raise ValueError('Android project is missing; restore tracked mobile sources')
     target_triple={'aarch64':'aarch64-linux-android','x86_64':'x86_64-linux-android'}[args.target]
     subprocess.run(['rustup','target','add',target_triple,'--toolchain','1.90.0'],env=env,check=True)
     if not (MOBILE/'src-tauri/Cargo.lock').exists():
@@ -98,7 +99,8 @@ def main():
     if args.debug and not args.keystore:shutil.copy2(apks[0],target)
     else:
         versions=sorted((args.sdk/'build-tools').iterdir(),key=lambda p:tuple(int(v) for v in p.name.split('.') if v.isdigit()))
-        signer=next((p/'apksigner.bat' for p in reversed(versions) if (p/'apksigner.bat').is_file()),None)
+        signer_name='apksigner.bat' if windows else 'apksigner'
+        signer=next((p/signer_name for p in reversed(versions) if (p/signer_name).is_file()),None)
         if signer is None:raise ValueError('Android apksigner is missing from the selected SDK')
         signing_env=dict(env)
         command=[str(signer),'sign']

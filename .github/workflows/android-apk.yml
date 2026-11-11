@@ -1,0 +1,50 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.0.12077973" "platform-tools"
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+          rustup target add aarch64-linux-android --toolchain 1.90.0
+      - name: UI dependencies
+        run: npm --prefix ui ci --no-audit --no-fund
+      - name: Build debug APK
+        run: |
+          python --version
+          python build-android.py --sdk "$ANDROID_HOME" --jdk "$JAVA_HOME" --build-python "$(command -v python)" --debug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-tools-debug-apk
+          path: |
+            artifacts/android/*.apk
+            artifacts/android/*.json
