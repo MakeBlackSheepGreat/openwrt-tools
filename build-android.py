@@ -112,6 +112,8 @@ def main():
                       '--ks-pass','env:OPENWRT_ANDROID_PREVIOUS_STORE_PASSWORD','--key-pass','env:OPENWRT_ANDROID_PREVIOUS_KEY_PASSWORD','--next-signer']
         command+=['--ks',str(args.keystore),'--ks-key-alias',args.key_alias,
                   '--ks-pass','env:OPENWRT_ANDROID_STORE_PASSWORD','--key-pass','env:OPENWRT_ANDROID_KEY_PASSWORD']
+        if args.keystore.suffix.lower() in ('.p12','.pfx','.pkcs12'):
+            command+=['--ks-type','PKCS12']
         if signing.get('lineage'):command+=['--lineage',str(signing['lineage']),'--rotation-min-sdk-version','28']
         subprocess.run(command+['--out',str(target),str(apks[0])],env=signing_env,check=True)
         subprocess.run([str(signer),'verify','--verbose',str(target)],env=env,check=True)

@@ -45,9 +45,18 @@ jobs:
         run: |
           python --version
           python build-android.py --sdk "$ANDROID_HOME" --jdk "$JAVA_HOME" --build-python "$(command -v python)" --debug
+      - name: Build release APK (self-signed)
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/openwrt-tools.p12"
+          OPENWRT_ANDROID_STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD" \
+          OPENWRT_ANDROID_KEY_PASSWORD="$ANDROID_KEYSTORE_PASSWORD" \
+          python build-android.py --sdk "$ANDROID_HOME" --jdk "$JAVA_HOME" --build-python "$(command -v python)" --keystore "$RUNNER_TEMP/openwrt-tools.p12"
       - uses: actions/upload-artifact@v4
         with:
-          name: openwrt-tools-debug-apk
+          name: openwrt-tools-apk
           path: |
             artifacts/android/*.apk
             artifacts/android/*.json
