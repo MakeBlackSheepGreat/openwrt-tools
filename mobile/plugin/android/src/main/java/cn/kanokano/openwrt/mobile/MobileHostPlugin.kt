@@ -79,6 +79,21 @@ class MobileHostPlugin(private val activity: Activity) : Plugin(activity) {
         super.load(webView)
         TaskProtection.attach(activity)
         MobileRuntime.listener = WeakReference(this)
+        requestLocalNetwork()
+    }
+
+    /** Android 17 blocks a targetSdk 37 app from every LAN address until this runtime grant. */
+    private fun requestLocalNetwork() {
+        val permission = when {
+            Build.VERSION.SDK_INT >= 37 -> "android.permission.ACCESS_LOCAL_NETWORK"
+            Build.VERSION.SDK_INT >= 33 -> Manifest.permission.NEARBY_WIFI_DEVICES
+            else -> return
+        }
+        if (ContextCompat.checkSelfPermission(activity, permission) == PackageManager.PERMISSION_GRANTED) return
+        val preferences = activity.getSharedPreferences("openwrt-tools", Context.MODE_PRIVATE)
+        if (preferences.getBoolean("local-network-requested", false)) return
+        preferences.edit().putBoolean("local-network-requested", true).apply()
+        activity.runOnUiThread { ActivityCompat.requestPermissions(activity, arrayOf(permission), 411) }
     }
     fun emit(line: String) {
         val event = JSObject(line)
